@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="vi" id="html-root">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bobigo AI — Local LLM Studio</title>
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="logo.png">
+    <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <!-- Marked.js for Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
+    <!-- Highlight.js for Syntax Highlighting -->
+    <link rel="stylesheet" id="highlight-style" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="dark">
+    <div class="app-layout">
+        <!-- 1. Leftmost Nav Rail -->
+        <nav class="nav-rail">
+            <div class="rail-top">
+                <div class="rail-brand" title="Bobigo AI Studio">
+                    <img src="logo.png" alt="Bobigo" class="brand-logo-img">
+                </div>
+                <button class="rail-btn active" id="rail-chat-btn" data-i18n-title="chat" title="Chat">
+                    <i class="fa-solid fa-message"></i>
+                </button>
+                <button class="rail-btn" id="rail-rp-btn" data-i18n-title="roleplay" title="Roleplay">
+                    <i class="fa-solid fa-masks-theater"></i>
+                </button>
+                <button class="rail-btn" id="rail-history-btn" data-i18n-title="history" title="History">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                </button>
+                <button class="rail-btn" id="rail-config-btn" data-i18n-title="config" title="Settings">
+                    <i class="fa-solid fa-sliders"></i>
+                </button>
+            </div>
+            <div class="rail-bottom">
+                <button class="rail-btn" id="theme-toggle" title="Đổi giao diện (Sáng / Tối)">
+                    <i class="fa-solid fa-sun sun-icon"></i>
+                    <i class="fa-solid fa-moon moon-icon"></i>
+                </button>
+                <button class="rail-btn" id="open-settings-btn" title="Cài đặt">
+                    <i class="fa-solid fa-gear"></i>
+                </button>
+            </div>
+        </nav>
+
+        <!-- 2. Chat Sessions Drawer -->
+        <aside class="history-panel" id="history-panel">
+            <div class="panel-header">
+                <h3 id="sidebar-title" data-i18n="conversations">Cuộc trò chuyện</h3>
+                <button class="btn-icon-sm" id="new-chat-btn" data-i18n-title="newItem" title="Tạo mới">
+                    <i class="fa-solid fa-plus"></i>
+                </button>
+            </div>
+            <div class="sidebar-tabs hidden" id="rp-tabs">
+                <button class="sidebar-tab active" data-rp-tab="worlds" data-i18n="tabWorlds">Kịch bản</button>
+                <button class="sidebar-tab" data-rp-tab="cast" data-i18n="tabCast">Nhân vật</button>
+                <button class="sidebar-tab" data-rp-tab="memory" data-i18n="tabMemory">Ký ức</button>
+            </div>
+            <div class="history-search" id="history-search-wrap">
+                <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                <input type="text" id="history-search-input" data-i18n-placeholder="searchChats" placeholder="Tìm kiếm cuộc trò chuyện...">
+            </div>
+            <div class="history-list" id="history-list"></div>
+            <div class="rp-pane hidden" id="rp-cast-pane">
+                <button class="btn-glass" id="add-character-btn" type="button">
+                    <i class="fa-solid fa-user-plus"></i> <span data-i18n="addChar">Thêm nhân vật</span>
+                </button>
+                <div class="cast-list" id="cast-list"></div>
+                <div class="config-group" style="margin-top:12px;">
+                    <label for="rp-user-name" data-i18n="youPlay">Bạn vào vai</label>
+                    <input type="text" id="rp-user-name" class="config-text-input" data-i18n-placeholder="yourName" placeholder="Tên người chơi">
+                    <textarea id="rp-user-desc" rows="2" data-i18n-placeholder="yourDesc" placeholder="Mô tả persona của bạn…"></textarea>
+                </div>
+            </div>
+            <div class="rp-pane hidden" id="rp-memory-pane">
+                <p class="rp-hint" data-i18n="memHint">Ký ức chỉ thuộc kịch bản này. AI được nhắc không quên các mục dưới.</p>
+                <div class="memory-list" id="memory-list"></div>
+                <div class="memory-add">
+                    <input type="text" id="memory-input" data-i18n-placeholder="memPh" placeholder="Thêm sự kiện / đặc điểm…">
+                    <button type="button" class="btn-icon-sm" id="memory-add-btn" title="Ghim ký ức">
+                        <i class="fa-solid fa-plus"></i>
+                    </button>
+                </div>
+                <button type="button" class="btn-text-danger" id="memory-clear-btn" data-i18n="memClear">Xóa ký ức phiên</button>
+            </div>
+            <div class="panel-footer" id="sidebar-footer">
+                <button class="btn-text-danger" id="clear-all-history-btn">
+                    <i class="fa-regular fa-trash-can"></i> <span data-i18n="clearHistory">Xóa toàn bộ lịch sử</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- 3. Main Chat Viewport -->
+        <main class="chat-viewport">
+            <!-- Background Crimson Ambient Glow -->
+            <div class="ambient-glow"></div>
+
+            <!-- Agent Topbar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button class="btn-icon-mobile" id="mobile-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                    <!-- Agent selector & badge -->
+                    <div class="model-selector-pill" id="model-pill" title="Trạng thái mô hình">
+                        <img src="logo.png" alt="Bobigo" class="pill-avatar">
+                        <div class="pill-text">
+                            <span class="model-name" id="model-name-label">Bobigo 35B</span>
+                            <span class="status-label" id="status-label">Đang kiểm tra…</span>
+                        </div>
+                        <div class="status-dot loading" id="status-dot" aria-hidden="true"></div>
+                        <span class="engine-badge">Local</span>
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <div class="lang-switch" id="lang-switch" title="Language">
+                        <button type="button" class="lang-btn active" data-lang="vi">VI</button>
+                        <button type="button" class="lang-btn" data-lang="en">EN</button>
+                    </div>
+                    <!-- Web Search Toggle -->
+                    <button class="btn-glass-sm search-toggle" id="web-search-toggle" title="Bật/Tắt tìm kiếm Web">
+                        <i class="fa-solid fa-globe"></i> <span data-i18n="webSearch">Web Search</span>
+                        <span class="toggle-indicator" id="search-indicator">OFF</span>
+                    </button>
+                    <!-- Export Dropdown -->
+                    <div class="dropdown">
+                        <button class="btn-glass-sm" id="export-dropdown-btn">
+                            <i class="fa-solid fa-arrow-up-from-bracket"></i> <span data-i18n="export">Xuất</span> <i class="fa-solid fa-chevron-down arrow-icon"></i>
+                        </button>
+                        <div class="dropdown-menu" id="export-menu">
+                            <button class="dropdown-item" id="export-md-btn"><i class="fa-regular fa-file-lines"></i> <span data-i18n="exportMd">Xuất Markdown (.md)</span></button>
+                            <button class="dropdown-item" id="export-json-btn"><i class="fa-regular fa-file-code"></i> <span data-i18n="exportJson">Xuất JSON (.json)</span></button>
+                            <button class="dropdown-item" id="export-story-btn"><i class="fa-solid fa-book"></i> <span data-i18n="exportStory">Xuất câu chuyện (.md)</span></button>
+                            <button class="dropdown-item" id="import-story-btn"><i class="fa-solid fa-file-import"></i> <span data-i18n="importStory">Nhập câu chuyện…</span></button>
+                        </div>
+                    </div>
+                    <input type="file" id="import-story-input" accept=".json,.md,.txt" style="display:none">
+                    <!-- Quick Toggle Config Drawer -->
+                    <button class="btn-icon-sm" id="topbar-config-btn" title="Bật/Tắt cấu hình nhanh">
+                        <i class="fa-solid fa-sliders"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="status-banner hidden" id="status-banner" role="status"></div>
+
+            <!-- Messages Container -->
+            <div class="messages-container" id="messages-container">
+                <!-- Welcome Screen / Hero State -->
+                <div class="welcome-screen" id="welcome-screen">
+                    <img src="logo.png" alt="" class="welcome-logo">
+                    <h1 id="welcome-h1">Xin chào, tôi là <span class="gradient-text">Bobigo</span></h1>
+                    <p id="welcome-sub">Tôi là Bobigo — tính toán, đọc file, search web và chạy Python khi bạn cần.</p>
+
+                    <div class="suggestions-grid">
+                        <button class="suggestion-card" data-prompt="Tính sqrt(144) + 2**8 bằng tool calculator.">
+                            <div class="card-header-icon"><i class="fa-solid fa-calculator"></i></div>
+                            <div class="card-title" data-i18n="cardCalc">Tính nhanh</div>
+                            <div class="card-desc" data-i18n="cardCalcDesc">Calculator: căn và lũy thừa</div>
+                        </button>
+                        <button class="suggestion-card" data-prompt="Đọc file backend/config.py rồi tóm tắt DEFAULT_MODEL và các tool đang bật.">
+                            <div class="card-header-icon"><i class="fa-solid fa-folder-open"></i></div>
+                            <div class="card-title" data-i18n="cardWs">Đọc workspace</div>
+                            <div class="card-desc" data-i18n="cardWsDesc">list_files / read_file trong repo</div>
+                        </button>
+                        <button class="suggestion-card" data-prompt="Chạy Python in ra 10 số Fibonacci đầu tiên.">
+                            <div class="card-header-icon"><i class="fa-solid fa-code"></i></div>
+                            <div class="card-title" data-i18n="cardPy">Chạy Python</div>
+                            <div class="card-desc" data-i18n="cardPyDesc">code_interpreter có timeout</div>
+                        </button>
+                        <button class="suggestion-card" data-prompt="Tìm trên web tin nổi bật hôm nay và tóm tắt 3 ý.">
+                            <div class="card-header-icon"><i class="fa-solid fa-globe"></i></div>
+                            <div class="card-title" data-i18n="cardWeb">Web search</div>
+                            <div class="card-desc" data-i18n="cardWebDesc">Agent tự gọi web_search</div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat Input Wrapper -->
+            <div class="chat-input-wrapper">
+                <div class="rp-scene-bar hidden" id="rp-scene-bar">
+                    <button type="button" class="btn-glass-sm" id="rp-generate-btn" title="Create from a brief">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="generate">Tạo từ mô tả</span>
+                    </button>
+                    <button type="button" class="btn-glass-sm" id="rp-edit-setting-btn" title="Bối cảnh & quy tắc">
+                        <i class="fa-solid fa-scroll"></i> <span data-i18n="scene">Bối cảnh</span>
+                    </button>
+                    <span class="rp-scene-title" id="rp-scene-title">Kịch bản mới</span>
+                </div>
+                <div class="chat-input-box glass">
+                    <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp văn bản">
+                        <i class="fa-solid fa-paperclip"></i>
+                    </button>
+                    <input type="file" id="file-input" accept=".txt,.md,.json,.py,.js,.html,.css" style="display: none;">
+                    
+                    <textarea 
+                        id="user-input" 
+                        placeholder="Nhắn cho Bobigo..." 
+                        rows="1"
+                        autocomplete="off"
+                    ></textarea>
+
+                    <button type="button" id="send-btn" class="send-btn" disabled title="Gửi (Enter)">
+                        <i class="fa-solid fa-arrow-up send-icon"></i>
+                        <i class="fa-solid fa-stop stop-icon" style="display:none;"></i>
+                    </button>
+                </div>
+                <p class="input-meta" id="input-meta">
+                    <span>Enter gửi · Shift+Enter xuống dòng · Esc dừng</span>
+                    <span>Bobigo có thể sai — hãy kiểm tra kết quả quan trọng.</span>
+                </p>
+            </div>
+        </main>
+
+        <!-- 4. Slide-out Config Panel -->
+        <aside class="config-panel" id="config-panel">
+            <div class="config-header">
+                <h3 data-i18n="config">Cấu hình</h3>
+                <button class="btn-icon-sm" id="close-config-btn">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <div class="config-body">
+                <div class="config-group">
+                    <label data-i18n="lang">Ngôn ngữ / Language</label>
+                    <div class="lang-switch lang-switch-wide" id="lang-switch-config">
+                        <button type="button" class="lang-btn" data-lang="vi">Tiếng Việt</button>
+                        <button type="button" class="lang-btn" data-lang="en">English</button>
+                    </div>
+                    <span class="config-hint" data-i18n="langHint">Đổi toàn bộ giao diện và ngôn ngữ trả lời. Bot chỉ cần biết mình là Bobigo.</span>
+                </div>
+
+                <div class="health-card" id="health-card">
+                    <div class="health-card-title" data-i18n="engine">Engine</div>
+                    <div class="health-card-line" id="health-card-line">Đang kiểm tra llama-server…</div>
+                </div>
+
+                <!-- System Prompt -->
+                <div class="config-group">
+                    <label for="system-prompt-input" data-i18n="systemPrompt">System prompt</label>
+                    <textarea id="system-prompt-input" rows="4" placeholder="Lời nhắc hệ thống cho agent…"></textarea>
+                </div>
+
+                <!-- Temperature -->
+                <div class="config-group">
+                    <div class="config-label-row">
+                        <label for="temp-slider" data-i18n="temp">Temperature</label>
+                        <span class="config-val" id="temp-val">0.70</span>
+                    </div>
+                    <input type="range" id="temp-slider" min="0.0" max="1.5" step="0.05" value="0.7">
+                    <span class="config-hint" data-i18n="tempHint">Thấp = chính xác. Cao = sáng tạo.</span>
+                </div>
+
+                <!-- Top P -->
+                <div class="config-group">
+                    <div class="config-label-row">
+                        <label for="topp-slider">Top-P (Nucleus Sampling)</label>
+                        <span class="config-val" id="topp-val">0.90</span>
+                    </div>
+                    <input type="range" id="topp-slider" min="0.0" max="1.0" step="0.05" value="0.9">
+                </div>
+
+                <!-- Repeat Penalty -->
+                <div class="config-group">
+                    <div class="config-label-row">
+                        <label for="penalty-slider">Repeat Penalty (Phạt lặp từ)</label>
+                        <span class="config-val" id="penalty-val">1.10</span>
+                    </div>
+                    <input type="range" id="penalty-slider" min="1.0" max="1.5" step="0.05" value="1.1">
+                </div>
+
+                <!-- Max Tokens -->
+                <div class="config-group">
+                    <label for="max-tokens-input" data-i18n="maxTokens">Max output tokens</label>
+                    <input type="number" id="max-tokens-input" value="4096" class="config-num-input">
+                </div>
+
+                <hr class="config-divider">
+
+                <!-- Toggles -->
+                <div class="config-toggle-row">
+                    <div class="toggle-info">
+                        <span class="toggle-label" data-i18n="memToggle">Ghi nhớ hội thoại</span>
+                        <span class="toggle-sub" data-i18n="memToggleSub">Gửi lại lịch sử tin nhắn trước đó</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="toggle-memory" checked>
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="config-toggle-row">
+                    <div class="toggle-info">
+                        <span class="toggle-label" data-i18n="reasonToggle">Hiển thị ô suy luận</span>
+                        <span class="toggle-sub" data-i18n="reasonToggleSub">Xem tiến trình suy luận</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="toggle-reasoning" checked>
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="config-toggle-row">
+                    <div class="toggle-info">
+                        <span class="toggle-label" data-i18n="searchToggle">Tìm kiếm web</span>
+                        <span class="toggle-sub" data-i18n="searchToggleSub">Khi tắt Agent: search rồi nhét vào prompt</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="toggle-websearch">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="config-toggle-row">
+                    <div class="toggle-info">
+                        <span class="toggle-label" data-i18n="agentToggle">Agent tools</span>
+                        <span class="toggle-sub" data-i18n="agentToggleSub">Search, calculator, Python, URL, đọc file</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="toggle-agent" checked>
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="config-footer">
+                <button class="btn-glass" id="reset-config-btn" data-i18n="reset">Khôi phục mặc định</button>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Character / setting editor -->
+    <div class="modal-backdrop hidden" id="rp-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="rp-modal-title">Nhân vật</h3>
+                <button type="button" class="btn-icon-sm" id="rp-modal-close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" id="rp-modal-body"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn-glass" id="rp-modal-delete" data-i18n="del">Xóa</button>
+                <button type="button" class="btn-primary" id="rp-modal-save" data-i18n="save">Lưu</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="rp-generate-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 data-i18n="generateTitle">Tạo chuyện mới</h3>
+                <button type="button" class="btn-icon-sm" id="rp-generate-close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="rp-hint" data-i18n="generateHint">Mô tả nhân vật, bối cảnh, thể loại. Bobigo điền hồ sơ — bạn chỉnh lại sau.</p>
+                <textarea id="rp-brief-input" rows="6" data-i18n-placeholder="generatePh" placeholder="Mô tả chuyện…"></textarea>
+                <pre class="generate-preview hidden" id="rp-generate-preview"></pre>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-primary" id="rp-generate-run" data-i18n="generateGo">Để Bobigo điền</button>
+                <button type="button" class="btn-primary hidden" id="rp-generate-apply" data-i18n="applyWorld">Tạo session và chỉnh</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="i18n.js" defer></script>
+    <script src="roleplay.js" defer></script>
+    <script src="app.js" defer></script>
+</body>
+</html>
