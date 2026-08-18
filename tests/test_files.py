@@ -40,3 +40,26 @@ def test_list_files_finds_python():
     listing = list_workspace_files("backend", "*.py")
     assert "backend/config.py" in listing
     assert ".venv" not in listing
+
+
+def test_extract_text_from_bytes_text():
+    from backend.tools.files import extract_text_from_bytes
+    raw = b"Hello Bobigo AI Studio!"
+    res = extract_text_from_bytes(raw, "note.txt")
+    assert res == "Hello Bobigo AI Studio!"
+
+
+def test_extract_text_from_pdf():
+    import io
+    from pypdf import PdfWriter
+    from backend.tools.files import extract_text_from_bytes
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=100, height=100)
+    
+    stream = io.BytesIO()
+    writer.write(stream)
+    pdf_bytes = stream.getvalue()
+
+    res = extract_text_from_bytes(pdf_bytes, "sample.pdf")
+    assert isinstance(res, str)

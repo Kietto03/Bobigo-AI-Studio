@@ -12,7 +12,9 @@ _BLOCKED_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".crt", ".der"}
 _TEXT_SUFFIXES = {
     ".py", ".md", ".txt", ".json", ".js", ".css", ".html", ".htm",
     ".sh", ".ini", ".toml", ".yml", ".yaml", ".cfg", ".xml",
-    ".csv", ".tsv", ".rst", ".svg",
+    ".csv", ".tsv", ".rst", ".svg", ".pdf", ".sql", ".log",
+    ".c", ".cpp", ".h", ".hpp", ".rs", ".go", ".java", ".php",
+    ".rb", ".swift", ".kt", ".env.example",
 }
 
 
@@ -22,6 +24,36 @@ class FileToolError(ValueError):
 
 def _root() -> Path:
     return Path(BASE_DIR).resolve()
+
+
+def extract_text_from_bytes(data: bytes, filename: str = "", max_bytes: int = MAX_READ_BYTES) -> str:
+    suffix = Path(filename).suffix.lower() if filename else ""
+    if suffix == ".pdf":
+        try:
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            pages_text: list[str] = []
+            total_len = 0
+            for idx, page in enumerate(reader.pages, start=1):
+                txt = (page.extract_text() or "").strip()
+                if not txt:
+                    continue
+                header = f"--- Trang {idx} ---\n"
+                pages_text.append(header + txt)
+                total_len += len(header) + len(txt)
+                if total_len > max_bytes:
+                    pages_text.append("\n[đã cắt bớt vì tài liệu quá dài]")
+                    break
+            return "\n\n".join(pages_text) if pages_text else "[Không tìm thấy nội dung văn bản trong tệp PDF này]"
+        except Exception as exc:
+            raise FileToolError(f"Lỗi đọc tệp PDF: {exc}") from exc
+
+    # Standard text-based formats
+    text = data[:max_bytes].decode("utf-8", errors="replace")
+    if len(data) > max_bytes:
+        return text + "\n\n[đã cắt bớt vì file quá dài]"
+    return text
 
 
 def resolve_in_workspace(rel: str) -> Path:
@@ -57,15 +89,11 @@ def read_workspace_file(path: str, max_bytes: int = MAX_READ_BYTES) -> str:
     if _is_secret_file(target):
         raise FileToolError("file bị chặn")
     if target.suffix.lower() not in _TEXT_SUFFIXES:
-        raise FileToolError(f"chỉ đọc file text ({', '.join(sorted(_TEXT_SUFFIXES))})")
+        raise FileToolError(f"chỉ đọc file văn bản hoặc PDF ({', '.join(sorted(_TEXT_SUFFIXES))})")
     data = target.read_bytes()
-    truncated = len(data) > max_bytes
-    text = data[:max_bytes].decode("utf-8", errors="replace")
     rel = target.relative_to(_root()).as_posix()
-    header = f"# {rel}\n"
-    if truncated:
-        return header + text + "\n\n[đã cắt bớt vì file quá dài]"
-    return header + text
+    content = extract_text_from_bytes(data, filename=target.name, max_bytes=max_bytes)
+    return f"# {rel}\n" + content
 
 
 def list_workspace_files(path: str = ".", pattern: str = "*") -> str:

@@ -97,6 +97,46 @@ async def websearch(request: Request):
     return {"query": query, "results": results}
 
 
+@app.post("/api/extract-file")
+async def extract_file(request: Request):
+    content_type = request.headers.get("content-type", "")
+    filename = "document"
+    raw_bytes = b""
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        uploaded_file = form.get("file")
+        if not uploaded_file:
+            return JSONResponse({"error": "Không tìm thấy tệp được tải lên"}, status_code=400)
+        filename = getattr(uploaded_file, "filename", "document") or "document"
+        raw_bytes = await uploaded_file.read()
+    else:
+        try:
+            data = await request.json()
+            filename = data.get("filename") or "document"
+            import base64
+            b64_content = data.get("content") or ""
+            raw_bytes = base64.b64decode(b64_content) if b64_content else b""
+        except Exception:
+            return JSONResponse({"error": "Định dạng dữ liệu không hợp lệ"}, status_code=400)
+
+    if not raw_bytes:
+        return JSONResponse({"error": "Tệp rỗng hoặc không có dữ liệu"}, status_code=400)
+
+    from backend.tools.files import extract_text_from_bytes, FileToolError
+    try:
+        text = extract_text_from_bytes(raw_bytes, filename=filename, max_bytes=100_000)
+        return {
+            "filename": filename,
+            "size": len(raw_bytes),
+            "text": text,
+        }
+    except FileToolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": f"Lỗi xử lý tệp: {exc}"}, status_code=500)
+
+
 @app.post("/api/roleplay/expand")
 async def roleplay_expand(request: Request):
     try:
@@ -170,4 +210,4 @@ app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="static")
 def run() -> None:
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    uvicorn.run("backend.app:app", host=HOST, port=PORT, log_level="info", reload=True)

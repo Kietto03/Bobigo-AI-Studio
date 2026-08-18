@@ -24,6 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const closeConfigBtn = document.getElementById("close-config-btn");
     const topbarConfigBtn = document.getElementById("topbar-config-btn");
     const mobileToggle = document.getElementById("mobile-toggle");
+    const sidebarOverlay = document.getElementById("sidebar-overlay");
 
     // History Panel Elements
     const newChatBtn = document.getElementById("new-chat-btn");
@@ -48,6 +49,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const sendBtn = document.getElementById("send-btn");
     const attachFileBtn = document.getElementById("attach-file-btn");
     const fileInput = document.getElementById("file-input");
+    const attachmentPreviewBar = document.getElementById("attachment-preview-bar");
+    let attachedFiles = [];
 
     // Export Dropdown
     const exportDropdownBtn = document.getElementById("export-dropdown-btn");
@@ -83,6 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let config = loadConfig();
     let abortController = null;
     let isGenerating = false;
+    let activeGenerations = new Map(); // sessionId -> { abortController, assistantMsgObj }
     let llmReady = false;
     let appMode = "chat";
     let worlds = (window.BobigoRP && BobigoRP.loadWorlds()) || [];
@@ -92,9 +96,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Configure Marked.js
     if (typeof marked !== "undefined") {
+        const renderer = new marked.Renderer();
+        renderer.table = function(header, body) {
+            if (typeof header === "object" && header !== null) {
+                const originalHtml = marked.Renderer.prototype.table.call(this, header);
+                return `<div class="table-wrapper">${originalHtml}</div>`;
+            }
+            return `<div class="table-wrapper"><table class="markdown-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+        };
+
+        if (typeof marked.use === "function") {
+            marked.use({ renderer: renderer });
+        }
+
         marked.setOptions({
             gfm: true,
             breaks: true,
+            renderer: renderer,
             highlight: function(code, lang) {
                 if (typeof hljs !== "undefined" && lang && hljs.getLanguage(lang)) {
                     try { return hljs.highlight(code, { language: lang }).value; } catch (e) {}
@@ -102,6 +120,86 @@ document.addEventListener("DOMContentLoaded", () => {
                 return code;
             }
         });
+    }
+
+    function enhanceMarkdownElements(container) {
+        if (!container) return;
+
+        // 1. Wrap and class tables
+        container.querySelectorAll("table").forEach(table => {
+            if (!table.parentElement.classList.contains("table-wrapper")) {
+                const wrapper = document.createElement("div");
+                wrapper.className = "table-wrapper";
+                table.parentNode.insertBefore(wrapper, table);
+                wrapper.appendChild(table);
+            }
+            table.classList.add("markdown-table");
+        });
+
+        // 2. Wrap and class code blocks with language badge and Copy Code button
+        container.querySelectorAll("pre").forEach(pre => {
+            if (pre.parentElement && pre.parentElement.classList.contains("code-card")) return;
+            const codeEl = pre.querySelector("code");
+            if (!codeEl) return;
+
+            let lang = "CODE";
+            codeEl.classList.forEach(cls => {
+                if (cls.startsWith("language-")) {
+                    lang = cls.replace("language-", "").toUpperCase();
+                }
+            });
+
+            const card = document.createElement("div");
+            card.className = "code-card";
+
+            const header = document.createElement("div");
+            header.className = "code-header";
+
+            const langBadge = document.createElement("span");
+            langBadge.className = "code-lang";
+            langBadge.innerHTML = `<i class="fa-solid fa-code"></i> <span>${escapeHtml(lang)}</span>`;
+
+            const copyBtn = document.createElement("button");
+            copyBtn.type = "button";
+            copyBtn.className = "code-copy-btn";
+            const i18n = window.BobigoI18n;
+            const currentLang = (config && config.language) || "vi";
+            const copyText = (i18n && i18n.t(currentLang, "copyCode")) || "Sao chép mã";
+            const copiedText = (i18n && i18n.t(currentLang, "copiedCode")) || "Đã chép!";
+            copyBtn.innerHTML = `<i class="fa-regular fa-copy"></i> <span>${escapeHtml(copyText)}</span>`;
+
+            copyBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                try {
+                    const rawCode = codeEl.innerText || codeEl.textContent;
+                    await navigator.clipboard.writeText(rawCode);
+                    copyBtn.innerHTML = `<i class="fa-solid fa-check" style="color:#10b981;"></i> <span style="color:#10b981;">${escapeHtml(copiedText)}</span>`;
+                    copyBtn.classList.add("copied");
+                    setTimeout(() => {
+                        copyBtn.innerHTML = `<i class="fa-regular fa-copy"></i> <span>${escapeHtml(copyText)}</span>`;
+                        copyBtn.classList.remove("copied");
+                    }, 1600);
+                } catch (err) {
+                    console.error("Copy code error:", err);
+                }
+            });
+
+            header.appendChild(langBadge);
+            header.appendChild(copyBtn);
+
+            pre.parentNode.insertBefore(card, pre);
+            card.appendChild(header);
+            card.appendChild(pre);
+        });
+
+        // 3. Syntax highlight if hljs available
+        if (typeof hljs !== "undefined") {
+            container.querySelectorAll("pre code").forEach((el) => {
+                try {
+                    hljs.highlightElement(el);
+                } catch (e) {}
+            });
+        }
     }
 
     // Initialize App
@@ -145,53 +243,143 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // --------------------------------------------------------------------------
-    // Navigation Rail & Drawer Toggles
+    // Navigation Rail & Drawer Controllers (Responsive)
     // --------------------------------------------------------------------------
+    function isMobile() {
+        return window.innerWidth <= 768;
+    }
+
+    function syncSidebarOverlay() {
+        if (!sidebarOverlay) return;
+        const isAnyOpen = (!historyPanel.classList.contains("closed") || !configPanel.classList.contains("closed") || document.body.classList.contains("sidebar-open") || document.body.classList.contains("config-open"));
+        if (isMobile() && isAnyOpen) {
+            sidebarOverlay.classList.remove("hidden");
+            sidebarOverlay.classList.add("active");
+        } else {
+            sidebarOverlay.classList.remove("active");
+            sidebarOverlay.classList.add("hidden");
+        }
+    }
+
+    function openHistoryDrawer() {
+        historyPanel.classList.remove("closed");
+        configPanel.classList.add("closed");
+        document.body.classList.add("sidebar-open");
+        document.body.classList.remove("config-open");
+        syncSidebarOverlay();
+    }
+
+    function closeHistoryDrawer() {
+        historyPanel.classList.add("closed");
+        document.body.classList.remove("sidebar-open");
+        syncSidebarOverlay();
+    }
+
+    function toggleHistoryDrawer() {
+        if (historyPanel.classList.contains("closed") || !document.body.classList.contains("sidebar-open")) {
+            openHistoryDrawer();
+        } else {
+            closeHistoryDrawer();
+        }
+    }
+
+    function openConfigDrawer() {
+        configPanel.classList.remove("closed");
+        if (isMobile()) {
+            historyPanel.classList.add("closed");
+            document.body.classList.remove("sidebar-open");
+        }
+        document.body.classList.add("config-open");
+        syncSidebarOverlay();
+    }
+
+    function closeConfigDrawer() {
+        configPanel.classList.add("closed");
+        document.body.classList.remove("config-open");
+        syncSidebarOverlay();
+    }
+
+    function toggleConfigDrawer() {
+        if (configPanel.classList.contains("closed")) {
+            openConfigDrawer();
+        } else {
+            closeConfigDrawer();
+        }
+    }
+
+    function closeAllDrawers() {
+        historyPanel.classList.add("closed");
+        configPanel.classList.add("closed");
+        document.body.classList.remove("sidebar-open", "config-open");
+        if (sidebarOverlay) {
+            sidebarOverlay.classList.remove("active");
+            sidebarOverlay.classList.add("hidden");
+        }
+    }
+
+    // Auto-close drawers on mobile on page load
+    if (isMobile()) {
+        closeAllDrawers();
+    }
+
+    if (sidebarOverlay) {
+        sidebarOverlay.addEventListener("click", () => {
+            closeAllDrawers();
+        });
+    }
+
     railChatBtn.addEventListener("click", () => {
         setMode("chat");
         setNavActive(railChatBtn);
-        historyPanel.classList.remove("closed");
-        configPanel.classList.add("closed");
+        openHistoryDrawer();
     });
 
     if (railRpBtn) {
         railRpBtn.addEventListener("click", () => {
             setMode("roleplay");
             setNavActive(railRpBtn);
-            historyPanel.classList.remove("closed");
-            configPanel.classList.add("closed");
+            openHistoryDrawer();
         });
     }
 
     railHistoryBtn.addEventListener("click", () => {
         setNavActive(railHistoryBtn);
-        historyPanel.classList.toggle("closed");
+        toggleHistoryDrawer();
     });
 
     railConfigBtn.addEventListener("click", () => {
         setNavActive(railConfigBtn);
-        configPanel.classList.toggle("closed");
+        toggleConfigDrawer();
     });
 
     openSettingsBtn.addEventListener("click", () => {
         setNavActive(railConfigBtn);
-        configPanel.classList.remove("closed");
+        openConfigDrawer();
     });
 
     closeConfigBtn.addEventListener("click", () => {
-        configPanel.classList.add("closed");
+        closeConfigDrawer();
         setNavActive(railChatBtn);
     });
 
     topbarConfigBtn.addEventListener("click", () => {
-        configPanel.classList.toggle("closed");
+        toggleConfigDrawer();
     });
 
     if (mobileToggle) {
         mobileToggle.addEventListener("click", () => {
-            historyPanel.classList.toggle("closed");
+            toggleHistoryDrawer();
         });
     }
+
+    window.addEventListener("resize", () => {
+        if (!isMobile()) {
+            if (sidebarOverlay) {
+                sidebarOverlay.classList.remove("active");
+                sidebarOverlay.classList.add("hidden");
+            }
+        }
+    });
 
     function setNavActive(btn) {
         navRailBtns.forEach(b => b.classList.remove("active"));
@@ -645,6 +833,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 renderCurrentSession();
                 syncRpSceneBar();
                 syncPersonaFields();
+                if (isMobile()) closeAllDrawers();
             });
             item.querySelector(".history-delete-btn").addEventListener("click", (e) => {
                 e.stopPropagation();
@@ -741,8 +930,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         filtered.forEach(session => {
+            const isGen = activeGenerations.has(session.id);
             const item = document.createElement("div");
-            item.className = `history-item ${session.id === currentSessionId ? "active" : ""}`;
+            item.className = `history-item ${session.id === currentSessionId ? "active" : ""} ${isGen ? "is-generating" : ""}`;
             item.setAttribute("data-id", session.id);
             const delTitle = i18n ? i18n.t(lang, "deleteChat") : "Xóa đoạn chat";
 
@@ -762,6 +952,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 currentSessionId = session.id;
                 renderHistoryList(filterQuery);
                 renderCurrentSession();
+                if (isMobile()) closeAllDrawers();
             });
 
             const deleteBtn = item.querySelector(".history-delete-btn");
@@ -787,49 +978,156 @@ document.addEventListener("DOMContentLoaded", () => {
         renderCurrentSession();
     }
 
-    clearAllHistoryBtn.addEventListener("click", () => {
-        const i18n = window.BobigoI18n;
-        const lang = config.language || "vi";
-        const promptText = i18n ? i18n.t(lang, "confirmClearHistory") : "Bạn có chắc chắn muốn xóa toàn bộ lịch sử trò chuyện không?";
-        if (confirm(promptText)) {
-            sessions = [];
-            createNewSession(true);
-        }
-    });
+    function branchSessionFromMessage(sessionId, msgIndex) {
+        const sourceSession = sessions.find(s => s.id === sessionId) || getActiveSession();
+        if (!sourceSession || !sourceSession.messages || sourceSession.messages.length === 0) return;
 
-    newChatBtn.addEventListener("click", () => {
-        if (appMode === "roleplay" && window.BobigoRP) {
-            const world = BobigoRP.newWorld({ language: config.language || "vi" });
-            worlds.unshift(world);
-            currentWorldId = world.id;
-            saveSessions();
-            renderSidebar();
+        const sliceCount = Math.min(msgIndex + 1, sourceSession.messages.length);
+        const branchedMessages = JSON.parse(JSON.stringify(sourceSession.messages.slice(0, sliceCount)));
+        branchedMessages.forEach(m => delete m.isStreaming);
+
+        const baseTitle = sourceSession.title || "Cuộc trò chuyện";
+        const newTitle = `${baseTitle} (Nhánh ${sliceCount})`;
+
+        const newSession = {
+            id: "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6),
+            title: newTitle,
+            createdAt: new Date().toISOString(),
+            messages: branchedMessages,
+            mode: sourceSession.mode || appMode,
+            world_id: sourceSession.world_id,
+            memory: sourceSession.memory ? JSON.parse(JSON.stringify(sourceSession.memory)) : [],
+        };
+
+        sessions.unshift(newSession);
+        currentSessionId = newSession.id;
+        saveSessions();
+        if (appMode === "roleplay") renderSidebar();
+        else renderHistoryList();
+        renderCurrentSession();
+        if (isMobile()) closeAllDrawers();
+    }
+
+    function editUserMessageAndResubmit(sessionId, msgIndex, newText) {
+        const session = sessions.find(s => s.id === sessionId) || getActiveSession();
+        if (!session || !session.messages || msgIndex >= session.messages.length) return;
+
+        const oldMsg = session.messages[msgIndex];
+        const attachments = oldMsg.attachments || [];
+        let attachContext = "";
+        if (attachments.length > 0) {
+            attachments.forEach(f => {
+                attachContext += `\n\n--- TỆP ĐÍNH KÈM: ${f.filename} (${formatFileSize(f.size)}) ---\n${f.text || ""}\n--- HẾT NỘI DUNG TỆP ---\n`;
+            });
+        }
+
+        const fullPrompt = newText.trim() + attachContext;
+
+        session.messages = session.messages.slice(0, msgIndex);
+        saveSessions();
+
+        if (currentSessionId !== sessionId) {
+            currentSessionId = sessionId;
             renderCurrentSession();
-            syncRpSceneBar();
-            return;
         }
-        createNewSession(true);
-    });
 
-    historySearchInput.addEventListener("input", (e) => {
-        if (appMode === "roleplay") {
-            renderWorldList(e.target.value.trim());
-            return;
+        handleSendMessage({
+            text: newText.trim(),
+            fullContent: fullPrompt,
+            attachments: attachments,
+            sessionId: sessionId,
+        });
+    }
+
+    function handleRegenerateFromIndex(msgIndex) {
+        const session = getActiveSession();
+        if (!session || !session.messages || msgIndex >= session.messages.length) return;
+        let userIndex = -1;
+        for (let i = msgIndex - 1; i >= 0; i--) {
+            if (session.messages[i].role === "user") {
+                userIndex = i;
+                break;
+            }
         }
-        renderHistoryList(e.target.value.trim());
-    });
+        if (userIndex === -1) return;
+        const userMsg = session.messages[userIndex];
+        session.messages = session.messages.slice(0, userIndex + 1);
+        saveSessions();
+        renderCurrentSession();
+        handleSendMessage({
+            regenerate: true,
+            text: userMsg.text || userMsg.content,
+            fullContent: userMsg.content,
+            attachments: userMsg.attachments,
+            sessionId: session.id,
+        });
+    }
+
+    function enterInlineEditMode(bubbleEl, initialText, msgIndex) {
+        const originalHTML = bubbleEl.innerHTML;
+        const i18n = window.BobigoI18n;
+        const lang = (config && config.language) || "vi";
+        const saveLabel = (i18n && i18n.t(lang, "saveAndSubmit")) || "Lưu & Gửi lại";
+        const cancelLabel = (i18n && i18n.t(lang, "cancel")) || "Hủy";
+
+        bubbleEl.innerHTML = `
+            <div class="inline-edit-container">
+                <textarea class="inline-edit-textarea" rows="3">${escapeHtml(initialText)}</textarea>
+                <div class="inline-edit-actions">
+                    <button type="button" class="btn-glass-sm inline-cancel-btn">${escapeHtml(cancelLabel)}</button>
+                    <button type="button" class="btn-brand-sm inline-save-btn"><i class="fa-solid fa-paper-plane"></i> ${escapeHtml(saveLabel)}</button>
+                </div>
+            </div>
+        `;
+
+        const textarea = bubbleEl.querySelector(".inline-edit-textarea");
+        const cancelBtn = bubbleEl.querySelector(".inline-cancel-btn");
+        const saveBtn = bubbleEl.querySelector(".inline-save-btn");
+
+        textarea.focus();
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+
+        cancelBtn.addEventListener("click", () => {
+            bubbleEl.innerHTML = originalHTML;
+            enhanceMarkdownElements(bubbleEl);
+        });
+
+        saveBtn.addEventListener("click", () => {
+            const newText = textarea.value.trim();
+            if (!newText) return;
+            editUserMessageAndResubmit(currentSessionId, msgIndex, newText);
+        });
+
+        textarea.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                bubbleEl.innerHTML = originalHTML;
+                enhanceMarkdownElements(bubbleEl);
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                const newText = textarea.value.trim();
+                if (!newText) return;
+                editUserMessageAndResubmit(currentSessionId, msgIndex, newText);
+            }
+        });
+    }
 
     function renderCurrentSession() {
         const session = getActiveSession();
         messagesContainer.innerHTML = "";
+
+        const isThisSessionGenerating = activeGenerations.has(session.id);
+        setGenerating(isThisSessionGenerating);
 
         if (!session.messages || session.messages.length === 0) {
             messagesContainer.appendChild(welcomeScreen);
             welcomeScreen.style.display = "block";
         } else {
             welcomeScreen.style.display = "none";
-            session.messages.forEach(msg => {
-                const msgEl = createMessageElement(msg.role, msg.content, msg.reasoning, msg.searchResults, msg.toolEvents);
+            session.messages.forEach((msg, idx) => {
+                const isMsgStreaming = (idx === session.messages.length - 1 && isThisSessionGenerating);
+                const msgEl = createMessageElement(msg.role, msg.content, msg.reasoning, msg.searchResults, msg.toolEvents, msg.attachments, msg.text, idx, isMsgStreaming);
                 messagesContainer.appendChild(msgEl);
             });
             scrollToBottom();
@@ -837,33 +1135,113 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // --------------------------------------------------------------------------
-    // File Attachment Logic
+    // File & PDF Attachment Logic
     // --------------------------------------------------------------------------
+    function formatFileSize(bytes) {
+        if (!bytes || bytes === 0) return "0 B";
+        const k = 1024;
+        const sizes = ["B", "KB", "MB", "GB"];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+    }
+
+    function renderAttachmentChips() {
+        if (!attachmentPreviewBar) return;
+        if (!attachedFiles || attachedFiles.length === 0) {
+            attachmentPreviewBar.classList.add("hidden");
+            attachmentPreviewBar.innerHTML = "";
+            return;
+        }
+        attachmentPreviewBar.classList.remove("hidden");
+        attachmentPreviewBar.innerHTML = "";
+        attachedFiles.forEach((file, index) => {
+            const chip = document.createElement("div");
+            chip.className = "attachment-chip";
+            const iconClass = file.isPdf ? "fa-solid fa-file-pdf file-icon pdf" : (file.isCode ? "fa-solid fa-file-code file-icon code" : "fa-solid fa-file-lines file-icon text");
+            chip.innerHTML = `
+                <i class="${iconClass}"></i>
+                <span class="file-name" title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</span>
+                <span class="file-size">${formatFileSize(file.size)}</span>
+                <button type="button" class="attachment-chip-remove" title="Gỡ tệp" data-index="${index}">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            `;
+            chip.querySelector(".attachment-chip-remove").addEventListener("click", (e) => {
+                e.stopPropagation();
+                attachedFiles.splice(index, 1);
+                renderAttachmentChips();
+                if (userInput.value.trim() === "" && attachedFiles.length === 0) {
+                    sendBtn.disabled = true;
+                }
+            });
+            attachmentPreviewBar.appendChild(chip);
+        });
+    }
+
     attachFileBtn.addEventListener("click", () => {
         fileInput.click();
     });
 
-    fileInput.addEventListener("change", (e) => {
+    fileInput.addEventListener("change", async (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
-        if (file.size > MAX_ATTACH_BYTES) {
-            alert("Tệp quá lớn (tối đa 80KB). Hãy chọn file nhỏ hơn hoặc dùng tool read_file.");
+        const maxBytes = 25 * 1024 * 1024; // 25 MB
+        if (file.size > maxBytes) {
+            alert("Tệp quá lớn (tối đa 25MB). Hãy chọn file nhỏ hơn.");
             fileInput.value = "";
             return;
         }
 
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const content = event.target.result;
-            const fileAttachmentTag = `\n\n\`\`\`${file.name.split('.').pop()}\n// File: ${file.name}\n${content}\n\`\`\``;
-            userInput.value += fileAttachmentTag;
-            userInput.style.height = "auto";
-            userInput.style.height = `${Math.min(userInput.scrollHeight, 128)}px`;
+        const isPdf = file.name.toLowerCase().endsWith(".pdf");
+        const codeExts = [".py", ".js", ".html", ".css", ".json", ".sql", ".sh", ".c", ".cpp", ".rs", ".go", ".java", ".php", ".rb", ".swift", ".kt"];
+        const isCode = codeExts.some(ext => file.name.toLowerCase().endsWith(ext));
+
+        // Show spinner on attach button
+        attachFileBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        attachFileBtn.disabled = true;
+
+        try {
+            if (isPdf || file.size > 150 * 1024) {
+                // Send to backend extractor
+                const formData = new FormData();
+                formData.append("file", file);
+                const resp = await fetch("/api/extract-file", {
+                    method: "POST",
+                    body: formData,
+                });
+                if (!resp.ok) {
+                    const errJson = await resp.json().catch(() => ({}));
+                    throw new Error(errJson.error || `HTTP ${resp.status}`);
+                }
+                const data = await resp.json();
+                attachedFiles.push({
+                    filename: file.name,
+                    size: file.size,
+                    text: data.text || "",
+                    isPdf: isPdf,
+                    isCode: isCode,
+                });
+            } else {
+                // Read text directly
+                const text = await file.text();
+                attachedFiles.push({
+                    filename: file.name,
+                    size: file.size,
+                    text: text,
+                    isPdf: false,
+                    isCode: isCode,
+                });
+            }
+            renderAttachmentChips();
             sendBtn.disabled = false;
-        };
-        reader.readAsText(file);
-        fileInput.value = "";
+        } catch (err) {
+            alert(`Lỗi đọc tệp ${file.name}: ${err.message}`);
+        } finally {
+            attachFileBtn.innerHTML = '<i class="fa-solid fa-paperclip"></i>';
+            attachFileBtn.disabled = false;
+            fileInput.value = "";
+        }
     });
 
     // --------------------------------------------------------------------------
@@ -880,11 +1258,17 @@ document.addEventListener("DOMContentLoaded", () => {
         if (on) {
             sendBtn.disabled = false;
         } else {
-            sendBtn.disabled = userInput.value.trim() === "" || !llmReady;
+            sendBtn.disabled = (userInput.value.trim() === "" && (!attachedFiles || attachedFiles.length === 0)) || !llmReady;
         }
     }
 
     function stopGeneration() {
+        if (activeGenerations.has(currentSessionId)) {
+            const gen = activeGenerations.get(currentSessionId);
+            if (gen && gen.abortController) {
+                gen.abortController.abort();
+            }
+        }
         if (abortController) {
             abortController.abort();
         }
@@ -894,36 +1278,36 @@ document.addEventListener("DOMContentLoaded", () => {
         userInput.style.height = "auto";
         userInput.style.height = `${Math.min(userInput.scrollHeight, 128)}px`;
         if (!isGenerating) {
-            sendBtn.disabled = userInput.value.trim() === "" || !llmReady;
+            sendBtn.disabled = (userInput.value.trim() === "" && (!attachedFiles || attachedFiles.length === 0)) || !llmReady;
         }
     });
 
     userInput.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && isGenerating) {
+        if (e.key === "Escape" && (isGenerating || activeGenerations.has(currentSessionId))) {
             e.preventDefault();
             stopGeneration();
             return;
         }
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (!isGenerating && userInput.value.trim() !== "") {
+            if (!isGenerating && (userInput.value.trim() !== "" || (attachedFiles && attachedFiles.length > 0))) {
                 handleSendMessage();
             }
         }
     });
 
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && isGenerating) {
+        if (e.key === "Escape" && (isGenerating || activeGenerations.has(currentSessionId))) {
             stopGeneration();
         }
     });
 
     sendBtn.addEventListener("click", () => {
-        if (isGenerating) {
+        if (isGenerating || activeGenerations.has(currentSessionId)) {
             stopGeneration();
             return;
         }
-        if (userInput.value.trim() !== "") {
+        if (userInput.value.trim() !== "" || (attachedFiles && attachedFiles.length > 0)) {
             handleSendMessage();
         }
     });
@@ -942,23 +1326,21 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     async function handleRegenerate() {
-        if (isGenerating) return;
         const session = getActiveSession();
         if (!session || !session.messages || !session.messages.length) return;
-        if (session.messages[session.messages.length - 1].role === "assistant") {
-            session.messages.pop();
-        }
-        const lastUser = [...session.messages].reverse().find((m) => m.role === "user");
-        if (!lastUser) return;
-        saveSessions();
-        renderCurrentSession();
-        await handleSendMessage({ regenerate: true, text: lastUser.content });
+        handleRegenerateFromIndex(session.messages.length - 1);
     }
 
     async function handleSendMessage(opts) {
         const regen = !!(opts && opts.regenerate);
-        const text = regen ? String(opts.text || "").trim() : userInput.value.trim();
-        if (!text || isGenerating) return;
+        let rawText = regen ? String(opts.text || "").trim() : userInput.value.trim();
+        if (!rawText && (!attachedFiles || attachedFiles.length === 0) && !(opts && opts.fullContent)) return;
+
+        const targetSession = (opts && opts.sessionId) ? (sessions.find(s => s.id === opts.sessionId) || getActiveSession()) : getActiveSession();
+        const targetSessionId = targetSession.id;
+
+        if (activeGenerations.has(targetSessionId)) return;
+
         if (!llmReady) {
             applyHealth({
                 llm_ready: false,
@@ -967,11 +1349,29 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
-        const session = getActiveSession();
+        const attachmentsMeta = (opts && opts.attachments) ? opts.attachments : [];
+        let attachContext = "";
+        if (!regen && !opts?.fullContent && attachedFiles && attachedFiles.length > 0) {
+            attachedFiles.forEach((f) => {
+                attachmentsMeta.push({
+                    filename: f.filename,
+                    size: f.size,
+                    isPdf: f.isPdf,
+                    isCode: f.isCode,
+                });
+                attachContext += `\n\n--- TỆP ĐÍNH KÈM: ${f.filename} (${formatFileSize(f.size)}) ---\n${f.text}\n--- HẾT NỘI DUNG TỆP ---\n`;
+            });
+            attachedFiles = [];
+            renderAttachmentChips();
+        }
+
+        const cleanPrompt = rawText.trim();
+        const fullPromptContent = opts && opts.fullContent ? opts.fullContent : ((cleanPrompt || "Hãy đọc, phân tích và tóm tắt tài liệu đính kèm sau:") + attachContext);
 
         // Update Title on First Message
-        if (!regen && session.messages.length === 0) {
-            session.title = text.length > 28 ? text.substring(0, 28) + "..." : text;
+        if (!regen && targetSession.messages.length === 0) {
+            const titleSource = cleanPrompt || "Đọc tài liệu";
+            targetSession.title = titleSource.length > 28 ? titleSource.substring(0, 28) + "..." : titleSource;
             saveSessions();
             if (appMode === "roleplay") renderSidebar();
             else renderHistoryList();
@@ -981,71 +1381,95 @@ document.addEventListener("DOMContentLoaded", () => {
             welcomeScreen.style.display = "none";
         }
 
-        if (!regen) {
+        if (!regen && currentSessionId === targetSessionId) {
             userInput.value = "";
             userInput.style.height = "auto";
         }
 
-        abortController = new AbortController();
-        setGenerating(true);
+        const sessionAbortController = new AbortController();
+        if (currentSessionId === targetSessionId) {
+            abortController = sessionAbortController;
+            setGenerating(true);
+        }
 
-        const userMsg = { role: "user", content: text };
+        const userMsg = {
+            role: "user",
+            content: fullPromptContent,
+            text: cleanPrompt,
+            attachments: attachmentsMeta.length > 0 ? attachmentsMeta : undefined,
+        };
         if (!regen) {
-            session.messages.push(userMsg);
+            targetSession.messages.push(userMsg);
             saveSessions();
-            appendMessageUI("user", text);
+            if (currentSessionId === targetSessionId) {
+                appendMessageUI("user", fullPromptContent, "", null, null, attachmentsMeta, cleanPrompt, targetSession.messages.length - 1);
+            }
         }
 
         // --- Web Search Phase (only when agent tools are off) ---
         let searchResults = [];
         let searchContextText = "";
         if (config.webSearch && config.agentTools === false && appMode !== "roleplay") {
-            const searchQuery = refineSearchQuery(text);
-            const searchingRow = createMessageElement("assistant", "");
-            const searchingBubble = searchingRow.querySelector(".bubble");
-            searchingBubble.innerHTML = `<span style="color: #10b981;"><i class="fa-solid fa-globe fa-spin"></i> Đang tìm kiếm: ${escapeHtml(searchQuery)}</span>`;
-            messagesContainer.appendChild(searchingRow);
-            scrollToBottom();
+            const searchQuery = refineSearchQuery(cleanPrompt || "tìm kiếm thông tin");
+            let searchingRow = null;
+            if (currentSessionId === targetSessionId) {
+                searchingRow = createMessageElement("assistant", "");
+                const searchingBubble = searchingRow.querySelector(".bubble");
+                searchingBubble.innerHTML = `<span style="color: #10b981;"><i class="fa-solid fa-globe fa-spin"></i> Đang tìm kiếm: ${escapeHtml(searchQuery)}</span>`;
+                messagesContainer.appendChild(searchingRow);
+                scrollToBottom();
+            }
 
             try {
-                searchResults = await performWebSearch(searchQuery, abortController.signal);
+                searchResults = await performWebSearch(searchQuery, sessionAbortController.signal);
                 searchContextText = formatSearchResultsForContext(searchResults);
             } catch (err) {
                 if (err.name === "AbortError") {
-                    messagesContainer.removeChild(searchingRow);
-                    setGenerating(false);
-                    abortController = null;
+                    if (searchingRow && searchingRow.parentElement) messagesContainer.removeChild(searchingRow);
+                    if (currentSessionId === targetSessionId) setGenerating(false);
                     return;
                 }
                 throw err;
             }
 
-            messagesContainer.removeChild(searchingRow);
+            if (searchingRow && searchingRow.parentElement) messagesContainer.removeChild(searchingRow);
         }
 
-        // Assistant Message Placeholder
-        const assistantMsgRow = createMessageElement("assistant", "");
-        const bubble = assistantMsgRow.querySelector(".bubble");
-        bubble.classList.add("cursor-typing");
+        // Assistant Streaming Placeholder
+        const assistantMsgObj = {
+            role: "assistant",
+            content: "",
+            reasoning: "",
+            searchResults: searchResults.length > 0 ? searchResults : undefined,
+            toolEvents: [],
+            isStreaming: true,
+        };
+        targetSession.messages.push(assistantMsgObj);
+        saveSessions();
 
-        // Show search results card above streaming response
-        if (searchResults.length > 0) {
-            bubble.innerHTML = buildSearchResultsHTML(searchResults);
+        activeGenerations.set(targetSessionId, {
+            abortController: sessionAbortController,
+            assistantMsgObj: assistantMsgObj,
+            targetSession: targetSession,
+        });
+
+        if (currentSessionId === targetSessionId) {
+            appendMessageUI("assistant", "", "", searchResults, null, null, null, targetSession.messages.length - 1, true);
         }
 
-        messagesContainer.appendChild(assistantMsgRow);
-        scrollToBottom();
+        // Update sidebar generating badge
+        if (appMode === "roleplay") renderSidebar();
+        else renderHistoryList();
 
         // Build Payload
         let messageContext = [];
         if (config.memory) {
-            messageContext = session.messages.map(m => ({ role: m.role, content: m.content }));
+            messageContext = targetSession.messages.slice(0, targetSession.messages.length - 1).map(m => ({ role: m.role, content: m.content }));
         } else {
             messageContext = [userMsg];
         }
 
-        // Inject search results into the last user message context
-        if (searchContextText) {
+        if (searchContextText && messageContext.length > 0) {
             const lastIdx = messageContext.length - 1;
             messageContext[lastIdx] = {
                 role: "user",
@@ -1070,7 +1494,7 @@ document.addEventListener("DOMContentLoaded", () => {
             mode: isRp ? "roleplay" : "chat",
         };
         if (isRp && window.BobigoRP) {
-            payload.roleplay = BobigoRP.toPayload(session);
+            payload.roleplay = BobigoRP.toPayload(targetSession);
         }
 
         let fullReasoning = "";
@@ -1082,7 +1506,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
-                signal: abortController.signal
+                signal: sessionAbortController.signal
             });
 
             if (!response.ok) {
@@ -1118,45 +1542,48 @@ document.addEventListener("DOMContentLoaded", () => {
                                 toolEvents = toolEvents.concat(incomingTools);
                             }
 
-                            let htmlOutput = "";
+                            // Keep in-memory message synchronized
+                            assistantMsgObj.content = fullAssistantContent;
+                            assistantMsgObj.reasoning = fullReasoning;
+                            assistantMsgObj.toolEvents = toolEvents;
 
-                            // Search results card (persistent)
-                            if (searchResults.length > 0) {
-                                htmlOutput += buildSearchResultsHTML(searchResults);
+                            if (currentSessionId === targetSessionId) {
+                                let htmlOutput = "";
+                                if (searchResults.length > 0) {
+                                    htmlOutput += buildSearchResultsHTML(searchResults);
+                                }
+                                if (toolEvents.length > 0) {
+                                    htmlOutput += buildToolEventsHTML(toolEvents, false);
+                                }
+                                if (config.showReasoning && fullReasoning) {
+                                    const i18n = window.BobigoI18n;
+                                    const lang = config.language || "vi";
+                                    const thinkTitle = (i18n && i18n.t(lang, "thinkingProgress")) || "Tiến trình suy luận";
+                                    htmlOutput += `<details class="thinking-box" open>
+                                        <summary><i class="fa-solid fa-brain"></i> ${escapeHtml(thinkTitle)}</summary>
+                                        <div class="thinking-content">${renderMarkdown(fullReasoning)}</div>
+                                    </details>`;
+                                }
+
+                                if (fullAssistantContent) {
+                                    htmlOutput += `<div class="response-content">${renderMarkdown(fullAssistantContent)}</div>`;
+                                } else if (!fullReasoning && toolEvents.length === 0) {
+                                    const i18n = window.BobigoI18n;
+                                    const lang = config.language || "vi";
+                                    const thinkPh = (i18n && i18n.t(lang, "thinkingPlaceholder")) || "Đang suy nghĩ…";
+                                    htmlOutput += `<span class="cursor-typing">${escapeHtml(thinkPh)}</span>`;
+                                }
+
+                                const lastAssistantRow = messagesContainer.querySelector(".message-row.assistant:last-child");
+                                if (lastAssistantRow) {
+                                    const liveBubble = lastAssistantRow.querySelector(".bubble");
+                                    if (liveBubble) {
+                                        liveBubble.innerHTML = htmlOutput;
+                                        enhanceMarkdownElements(liveBubble);
+                                        scrollToBottom();
+                                    }
+                                }
                             }
-
-                            if (toolEvents.length > 0) {
-                                htmlOutput += buildToolEventsHTML(toolEvents, false);
-                            }
-
-                            if (config.showReasoning && fullReasoning) {
-                                const i18n = window.BobigoI18n;
-                                const lang = config.language || "vi";
-                                const thinkTitle = (i18n && i18n.t(lang, "thinkingProgress")) || "Tiến trình suy luận";
-                                htmlOutput += `<details class="thinking-box" open>
-                                    <summary><i class="fa-solid fa-brain"></i> ${escapeHtml(thinkTitle)}</summary>
-                                    <div class="thinking-content">${renderMarkdown(fullReasoning)}</div>
-                                </details>`;
-                            }
-
-                            if (fullAssistantContent) {
-                                htmlOutput += `<div class="response-content">${renderMarkdown(fullAssistantContent)}</div>`;
-                            } else if (!fullReasoning && toolEvents.length === 0) {
-                                const i18n = window.BobigoI18n;
-                                const lang = config.language || "vi";
-                                const thinkPh = (i18n && i18n.t(lang, "thinkingPlaceholder")) || "Đang suy nghĩ…";
-                                htmlOutput += `<span class="cursor-typing">${escapeHtml(thinkPh)}</span>`;
-                            }
-
-                            bubble.innerHTML = htmlOutput;
-
-                            if (typeof hljs !== "undefined") {
-                                bubble.querySelectorAll("pre code").forEach((el) => {
-                                    hljs.highlightElement(el);
-                                });
-                            }
-
-                            scrollToBottom();
 
                         } catch (err) {
                             console.error("JSON parse error", err);
@@ -1165,50 +1592,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
 
-            // Collapse thinking box after completion
-            const thinkingBox = bubble.querySelector(".thinking-box");
-            if (thinkingBox && fullAssistantContent) {
-                thinkingBox.removeAttribute("open");
-            }
-
-            // Collapse search results after completion
-            const searchCard = bubble.querySelector(".search-results-card");
-            if (searchCard) {
-                searchCard.removeAttribute("open");
-            }
-
-            const toolCard = bubble.querySelector(".tool-calls-card");
-            if (toolCard) {
-                toolCard.removeAttribute("open");
-            }
-
-            bubble.classList.remove("cursor-typing");
-
             if (isRp && window.BobigoRP) {
                 const harvested = BobigoRP.harvestMemory(fullAssistantContent);
-                harvested.facts.forEach((fact) => BobigoRP.addMemory(session, fact, "model"));
+                harvested.facts.forEach((fact) => BobigoRP.addMemory(targetSession, fact, "model"));
                 fullAssistantContent = harvested.clean;
-                BobigoRP.appendSceneLog(session, text, fullAssistantContent);
-                if (harvested.clean !== undefined) {
-                    const contentEl = bubble.querySelector(".response-content");
-                    if (contentEl && fullAssistantContent) {
-                        contentEl.innerHTML = renderMarkdown(fullAssistantContent);
-                    }
-                }
+                BobigoRP.appendSceneLog(targetSession, cleanPrompt, fullAssistantContent);
+                if (isRp) renderMemoryList();
             }
 
-            session.messages.push({
-                role: "assistant",
-                content: fullAssistantContent,
-                reasoning: fullReasoning,
-                searchResults: searchResults.length > 0 ? searchResults : undefined,
-                toolEvents: toolEvents.length > 0 ? toolEvents : undefined
-            });
-            saveSessions();
-            if (isRp) renderMemoryList();
+            assistantMsgObj.content = fullAssistantContent;
+            assistantMsgObj.reasoning = fullReasoning;
+            assistantMsgObj.toolEvents = toolEvents;
 
         } catch (error) {
-            bubble.classList.remove("cursor-typing");
             const i18n = window.BobigoI18n;
             const lang = config.language || "vi";
             if (error.name === "AbortError") {
@@ -1216,37 +1612,65 @@ document.addEventListener("DOMContentLoaded", () => {
                 const stopped = fullAssistantContent
                     ? `${fullAssistantContent}\n\n${stopLabel}`
                     : stopLabel;
-                fullAssistantContent = stopped;
-                let htmlOutput = "";
-                if (searchResults.length > 0) htmlOutput += buildSearchResultsHTML(searchResults);
-                if (toolEvents.length > 0) htmlOutput += buildToolEventsHTML(toolEvents, true);
-                htmlOutput += `<div class="response-content">${renderMarkdown(stopped)}</div>`;
-                bubble.innerHTML = htmlOutput;
-                session.messages.push({
-                    role: "assistant",
-                    content: stopped,
-                    reasoning: fullReasoning,
-                    searchResults: searchResults.length > 0 ? searchResults : undefined,
-                    toolEvents: toolEvents.length > 0 ? toolEvents : undefined
-                });
-                saveSessions();
+                assistantMsgObj.content = stopped;
             } else {
                 const errTitle = (i18n && i18n.t(lang, "modelError")) || "Lỗi kết nối mô hình";
-                bubble.innerHTML = `<span style="color:#ef4444;"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(errTitle)}: ${escapeHtml(error.message || String(error))}</span>`;
+                assistantMsgObj.content = `[${errTitle}: ${error.message || String(error)}]`;
             }
         } finally {
-            setGenerating(false);
-            abortController = null;
+            delete assistantMsgObj.isStreaming;
+            activeGenerations.delete(targetSessionId);
+            saveSessions();
+
+            if (currentSessionId === targetSessionId) {
+                setGenerating(false);
+                renderCurrentSession();
+            }
+            if (appMode === "roleplay") renderSidebar();
+            else renderHistoryList();
         }
     }
 
-    function appendMessageUI(role, content, reasoning = "", searchResults = null) {
-        const msgEl = createMessageElement(role, content, reasoning, searchResults);
+    function parseUserMessageContent(rawContent, msgAttachments, msgUserText) {
+        if (msgAttachments && msgAttachments.length > 0) {
+            return {
+                text: msgUserText !== undefined ? msgUserText : rawContent,
+                attachments: msgAttachments,
+            };
+        }
+        if (rawContent && rawContent.includes("--- TỆP ĐÍNH KÈM:")) {
+            const attachRegex = /--- TỆP ĐÍNH KÈM:\s*(.*?)\s*\((.*?)\)\s*---\n([\s\S]*?)--- HẾT NỘI DUNG TỆP ---/g;
+            const atts = [];
+            let match;
+            while ((match = attachRegex.exec(rawContent)) !== null) {
+                const filename = match[1].trim();
+                const sizeStr = match[2].trim();
+                const isPdf = filename.toLowerCase().endsWith(".pdf");
+                const codeExts = [".py", ".js", ".html", ".css", ".json", ".sql", ".sh", ".c", ".cpp", ".rs", ".go", ".java", ".php", ".rb", ".swift", ".kt"];
+                const isCode = codeExts.some((ext) => filename.toLowerCase().endsWith(ext));
+                atts.push({
+                    filename,
+                    sizeStr,
+                    isPdf,
+                    isCode,
+                });
+            }
+            const cleanText = rawContent.replace(/--- TỆP ĐÍNH KÈM:\s*[\s\S]*?--- HẾT NỘI DUNG TỆP ---\n?/g, "").trim();
+            return {
+                text: cleanText,
+                attachments: atts,
+            };
+        }
+        return { text: rawContent || "", attachments: [] };
+    }
+
+    function appendMessageUI(role, content, reasoning = "", searchResults = null, toolEvents = null, attachments = null, userText = null, msgIndex = null, isStreaming = false) {
+        const msgEl = createMessageElement(role, content, reasoning, searchResults, toolEvents, attachments, userText, msgIndex, isStreaming);
         messagesContainer.appendChild(msgEl);
         scrollToBottom();
     }
 
-    function createMessageElement(role, content, reasoning = "", searchResults = null, toolEvents = null) {
+    function createMessageElement(role, content, reasoning = "", searchResults = null, toolEvents = null, attachments = null, userText = null, msgIndex = null, isStreaming = false) {
         const row = document.createElement("div");
         row.className = `message-row ${role}`;
 
@@ -1260,51 +1684,143 @@ document.addEventListener("DOMContentLoaded", () => {
         stack.className = "message-stack";
 
         const bubble = document.createElement("div");
-        bubble.className = "bubble";
+        bubble.className = `bubble ${isStreaming ? "cursor-typing" : ""}`;
 
         let htmlOutput = "";
 
         // Search results card
         if (searchResults && searchResults.length > 0) {
             htmlOutput += buildSearchResultsHTML(searchResults);
-            // Collapse for historical messages
-            htmlOutput = htmlOutput.replace(' open', '');
+            if (!isStreaming) htmlOutput = htmlOutput.replace(' open', '');
         }
 
         if (toolEvents && toolEvents.length > 0) {
-            htmlOutput += buildToolEventsHTML(toolEvents, true);
+            htmlOutput += buildToolEventsHTML(toolEvents, !isStreaming);
         }
 
         if (reasoning && config.showReasoning) {
             const i18n = window.BobigoI18n;
             const lang = config.language || "vi";
             const thinkTitle = (i18n && i18n.t(lang, "thinkingProgress")) || "Tiến trình suy luận";
-            htmlOutput += `<details class="thinking-box">
+            htmlOutput += `<details class="thinking-box" ${isStreaming ? "open" : ""}>
                 <summary><i class="fa-solid fa-brain"></i> ${escapeHtml(thinkTitle)}</summary>
                 <div class="thinking-content">${renderMarkdown(reasoning)}</div>
             </details>`;
         }
 
-        if (content) {
+        let parsedUser = { text: content || "", attachments: [] };
+
+        if (content || (attachments && attachments.length > 0)) {
             if (role === "user") {
-                htmlOutput += escapeHtml(content);
+                parsedUser = parseUserMessageContent(content, attachments, userText);
+                let userHtml = "";
+                if (parsedUser.attachments && parsedUser.attachments.length > 0) {
+                    userHtml += '<div class="user-attachments-grid">';
+                    parsedUser.attachments.forEach((att) => {
+                        const iconType = att.isPdf ? "pdf" : (att.isCode ? "code" : "text");
+                        const iconClass = att.isPdf ? "fa-solid fa-file-pdf" : (att.isCode ? "fa-solid fa-file-code" : "fa-solid fa-file-lines");
+                        const typeLabel = att.isPdf ? "PDF" : (att.isCode ? "Mã nguồn" : "Tài liệu");
+                        const sizeLabel = att.sizeStr || (att.size ? formatFileSize(att.size) : "");
+                        userHtml += `
+                            <div class="user-attachment-card">
+                                <div class="uac-icon ${iconType}">
+                                    <i class="${iconClass}"></i>
+                                </div>
+                                <div class="uac-info">
+                                    <div class="uac-name" title="${escapeHtml(att.filename)}">${escapeHtml(att.filename)}</div>
+                                    <div class="uac-meta">${typeLabel}${sizeLabel ? ` · ${sizeLabel}` : ""}</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    userHtml += '</div>';
+                }
+                if (parsedUser.text) {
+                    userHtml += `<div class="user-prompt-text">${escapeHtml(parsedUser.text)}</div>`;
+                }
+                htmlOutput += userHtml;
             } else {
                 htmlOutput += `<div class="response-content">${renderMarkdown(content)}</div>`;
             }
         }
 
         bubble.innerHTML = htmlOutput;
+        enhanceMarkdownElements(bubble);
         stack.appendChild(bubble);
 
-        if (role === "assistant" && content) {
-            const actions = document.createElement("div");
-            actions.className = "msg-actions";
-            const i18n = window.BobigoI18n;
-            const lang = config.language || "vi";
+        // Actions bar on hover
+        const actions = document.createElement("div");
+        actions.className = "msg-actions";
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+
+        if (role === "user") {
+            // Edit Prompt Button
+            const editBtn = document.createElement("button");
+            editBtn.type = "button";
+            editBtn.className = "msg-action-btn edit-msg-btn";
+            editBtn.title = i18n ? i18n.t(lang, "editPrompt") : "Chỉnh sửa tin nhắn";
+            editBtn.innerHTML = '<i class="fa-solid fa-pen"></i>';
+            editBtn.addEventListener("click", () => {
+                enterInlineEditMode(bubble, parsedUser.text || content, msgIndex);
+            });
+            actions.appendChild(editBtn);
+
+            // Branch Chat Button
+            const branchBtn = document.createElement("button");
+            branchBtn.type = "button";
+            branchBtn.className = "msg-action-btn branch-msg-btn";
+            branchBtn.title = i18n ? i18n.t(lang, "branchChat") : "Rẽ nhánh từ đây";
+            branchBtn.innerHTML = '<i class="fa-solid fa-code-branch"></i>';
+            branchBtn.addEventListener("click", () => {
+                branchSessionFromMessage(currentSessionId, msgIndex);
+            });
+            actions.appendChild(branchBtn);
+
+            // Copy Prompt Button
             const copyBtn = document.createElement("button");
             copyBtn.type = "button";
             copyBtn.className = "msg-action-btn";
-            copyBtn.title = i18n ? i18n.t(lang, "copy") : "Copy";
+            copyBtn.title = i18n ? i18n.t(lang, "copy") : "Sao chép";
+            copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i>';
+            copyBtn.addEventListener("click", async () => {
+                try {
+                    await navigator.clipboard.writeText(parsedUser.text || content);
+                    copyBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+                    setTimeout(() => { copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i>'; }, 1200);
+                } catch (err) {
+                    console.error(err);
+                }
+            });
+            actions.appendChild(copyBtn);
+            stack.appendChild(actions);
+
+        } else if (role === "assistant" && content) {
+            // Branch Chat Button
+            const branchBtn = document.createElement("button");
+            branchBtn.type = "button";
+            branchBtn.className = "msg-action-btn branch-msg-btn";
+            branchBtn.title = i18n ? i18n.t(lang, "branchChat") : "Rẽ nhánh từ đây";
+            branchBtn.innerHTML = '<i class="fa-solid fa-code-branch"></i>';
+            branchBtn.addEventListener("click", () => {
+                branchSessionFromMessage(currentSessionId, msgIndex);
+            });
+            actions.appendChild(branchBtn);
+
+            // Regenerate Button
+            const regenBtn = document.createElement("button");
+            regenBtn.type = "button";
+            regenBtn.className = "msg-action-btn regen-btn";
+            regenBtn.title = i18n ? i18n.t(lang, "regen") : "Tạo lại";
+            regenBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i>';
+            regenBtn.addEventListener("click", () => handleRegenerateFromIndex(msgIndex));
+            actions.appendChild(regenBtn);
+
+            // Copy Button
+            const copyBtn = document.createElement("button");
+            copyBtn.type = "button";
+            copyBtn.className = "msg-action-btn";
+            copyBtn.title = i18n ? i18n.t(lang, "copy") : "Sao chép";
             copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i>';
             copyBtn.addEventListener("click", async () => {
                 try {
@@ -1316,13 +1832,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             });
             actions.appendChild(copyBtn);
-            const regenBtn = document.createElement("button");
-            regenBtn.type = "button";
-            regenBtn.className = "msg-action-btn regen-btn";
-            regenBtn.title = i18n ? i18n.t(lang, "regen") : "Regenerate";
-            regenBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i>';
-            regenBtn.addEventListener("click", () => handleRegenerate());
-            actions.appendChild(regenBtn);
             stack.appendChild(actions);
         }
 

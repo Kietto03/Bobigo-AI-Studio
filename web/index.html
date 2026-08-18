@@ -21,6 +21,7 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="dark">
+    <div class="sidebar-overlay hidden" id="sidebar-overlay"></div>
     <div class="app-layout">
         <!-- 1. Leftmost Nav Rail -->
         <nav class="nav-rail">
@@ -198,11 +199,12 @@
                     </button>
                     <span class="rp-scene-title" id="rp-scene-title">Kịch bản mới</span>
                 </div>
+                <div class="attachment-preview-bar hidden" id="attachment-preview-bar"></div>
                 <div class="chat-input-box glass">
-                    <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp văn bản">
+                    <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp văn bản / PDF">
                         <i class="fa-solid fa-paperclip"></i>
                     </button>
-                    <input type="file" id="file-input" accept=".txt,.md,.json,.py,.js,.html,.css" style="display: none;">
+                    <input type="file" id="file-input" accept=".pdf,.docx,.txt,.md,.json,.py,.js,.html,.css,.csv,.tsv,.xml,.yaml,.yml,.sql,.sh,.log,.c,.cpp,.h,.hpp,.rs,.go,.java,.php,.rb,.swift,.kt,.env.example" style="display: none;">
                     
                     <textarea 
                         id="user-input" 
@@ -224,7 +226,7 @@
         </main>
 
         <!-- 4. Slide-out Config Panel -->
-        <aside class="config-panel" id="config-panel">
+        <aside class="config-panel closed" id="config-panel">
             <div class="config-header">
                 <h3 data-i18n="config">Cấu hình</h3>
                 <button class="btn-icon-sm" id="close-config-btn">
