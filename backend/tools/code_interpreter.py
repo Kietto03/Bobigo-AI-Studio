@@ -76,6 +76,18 @@ class CodeInterpreterError(ValueError):
     pass
 
 
+# Reflection / dynamic-execution builtins. The runtime keeps these alive because
+# CPython's import machinery needs them, so we forbid *referencing them by name*
+# in user code instead. Combined with the _-prefix rule below (which blocks
+# __builtins__, __import__, .__class__, …) this leaves no way to reach
+# object.__subclasses__() and break out of the sandbox.
+_BLOCKED_NAMES = frozenset({
+    "getattr", "setattr", "delattr", "vars", "globals", "locals",
+    "eval", "exec", "compile", "open", "input", "__import__",
+    "breakpoint", "memoryview",
+})
+
+
 def _assert_safe_ast(source: str) -> None:
     try:
         tree = ast.parse(source)
@@ -84,8 +96,11 @@ def _assert_safe_ast(source: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise CodeInterpreterError("không cho phép truy cập thuộc tính nội bộ")
-        if isinstance(node, ast.Name) and node.id.startswith("_"):
-            raise CodeInterpreterError("không cho phép tên bắt đầu bằng _")
+        if isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                raise CodeInterpreterError("không cho phép tên bắt đầu bằng _")
+            if node.id in _BLOCKED_NAMES:
+                raise CodeInterpreterError(f"không cho phép dùng '{node.id}'")
 
 
 def run_python(code: str, timeout: int = CODE_EXEC_TIMEOUT) -> str:

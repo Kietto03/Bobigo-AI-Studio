@@ -11,10 +11,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.agent.compress import summarize_messages
 from backend.agent.loop import stream_agent
 from backend.config import HOST, LLM_BASE_URL, LLM_TIMEOUT, PORT, WEB_DIR
 from backend.expand import expand_world
 from backend.health import probe_llm
+from backend.mcp import MCPManager
+from backend.tools import SCHEMAS
 from backend.tools.web_search import duckduckgo_search
 
 
@@ -23,7 +26,16 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(LLM_TIMEOUT, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         app.state.http = client
-        yield
+        mcp = MCPManager()
+        try:
+            await mcp.start()
+        except Exception:  # noqa: BLE001 — MCP is optional, never block startup
+            pass
+        app.state.mcp = mcp
+        try:
+            yield
+        finally:
+            await mcp.aclose()
 
 
 app = FastAPI(title="Bobigo AI Studio", lifespan=lifespan)
@@ -81,6 +93,40 @@ async def health(request: Request):
 @app.get("/v1/models")
 async def list_models(request: Request):
     return await _proxy_stream(request, "/v1/models")
+
+
+def _builtin_catalog() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for schema in SCHEMAS:
+        fn = schema.get("function") or {}
+        props = ((fn.get("parameters") or {}).get("properties") or {})
+        out.append({
+            "name": fn.get("name"),
+            "description": fn.get("description") or "",
+            "parameters": list(props.keys()),
+        })
+    return out
+
+
+@app.get("/api/tools")
+async def tools_catalog(request: Request):
+    mcp = getattr(request.app.state, "mcp", None)
+    mcp_tools: list[dict[str, Any]] = []
+    if mcp is not None:
+        for schema in mcp.list_tools():
+            fn = schema.get("function") or {}
+            mcp_tools.append({"name": fn.get("name"), "description": fn.get("description") or ""})
+    return {
+        "builtin": _builtin_catalog(),
+        "mcp": mcp_tools,
+        "servers": mcp.servers_status() if mcp is not None else [],
+    }
+
+
+@app.get("/api/mcp/servers")
+async def mcp_servers(request: Request):
+    mcp = getattr(request.app.state, "mcp", None)
+    return {"servers": mcp.servers_status() if mcp is not None else []}
 
 
 @app.post("/api/websearch")
@@ -156,6 +202,32 @@ async def roleplay_expand(request: Request):
     return world
 
 
+@app.post("/api/compress")
+async def compress_conversation(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return JSONResponse({"error": "Missing messages"}, status_code=400)
+    language = data.get("language") or "vi"
+    model = data.get("model") or None
+    keep_recent = int(data.get("keep_recent") or 0)
+    to_summarize = messages[:-keep_recent] if keep_recent > 0 else messages
+    if not to_summarize:
+        return {"summary": "", "compressed_count": 0}
+    try:
+        summary = await summarize_messages(
+            to_summarize, request.app.state.http, model=model, language=language
+        )
+    except httpx.HTTPError as exc:
+        return JSONResponse({"error": f"LLM error: {exc}"}, status_code=502)
+    except ValueError as exc:
+        return JSONResponse({"error": f"Parse error: {exc}"}, status_code=502)
+    return {"summary": summary, "compressed_count": len(to_summarize)}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
@@ -186,7 +258,11 @@ async def chat_completions(request: Request):
     body["agent_tools"] = agent_tools
 
     async def _agent_out():
-        async for chunk in stream_agent(body, http_client=request.app.state.http):
+        async for chunk in stream_agent(
+            body,
+            http_client=request.app.state.http,
+            mcp=getattr(request.app.state, "mcp", None),
+        ):
             if await request.is_disconnected():
                 break
             yield chunk

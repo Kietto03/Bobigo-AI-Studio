@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from backend.config import DEFAULT_MODEL, LLM_BASE_URL
+from backend.config import CONTEXT_WINDOW, DEFAULT_MODEL, LLM_BASE_URL, REPLY_RESERVE
 
 
 def _llama_cmdline() -> str:
@@ -58,6 +58,8 @@ async def probe_llm(client: httpx.AsyncClient) -> dict[str, Any]:
             "jinja_known": jinja is not None,
             "message": message,
             "llm_base_url": LLM_BASE_URL,
+            "context_window": CONTEXT_WINDOW,
+            "reply_reserve": REPLY_RESERVE,
         }
     except httpx.HTTPError:
         jinja, _cmdline = jinja_status()
@@ -69,4 +71,6 @@ async def probe_llm(client: httpx.AsyncClient) -> dict[str, Any]:
             "jinja_known": jinja is not None,
             "message": "Không kết nối được llama-server. Đợi model load hoặc chạy ./run.sh.",
             "llm_base_url": LLM_BASE_URL,
+            "context_window": CONTEXT_WINDOW,
+            "reply_reserve": REPLY_RESERVE,
         }

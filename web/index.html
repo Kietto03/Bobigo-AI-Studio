@@ -6,18 +6,16 @@
     <title>Bobigo AI — Local LLM Studio</title>
     <!-- Favicon -->
     <link rel="icon" type="image/png" href="logo.png">
-    <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <!-- FontAwesome Icons -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <!-- Marked.js for Markdown -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
-    <!-- Highlight.js for Syntax Highlighting -->
-    <link rel="stylesheet" id="highlight-style" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+    <!-- Fonts (self-hosted: Plus Jakarta Sans & JetBrains Mono, latin/latin-ext/vietnamese) -->
+    <link rel="stylesheet" href="vendor/fonts/fonts.css">
+    <!-- FontAwesome Icons (self-hosted 6.5.1) -->
+    <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
+    <!-- Marked.js + DOMPurify (self-hosted) -->
+    <script src="vendor/marked.min.js" defer></script>
+    <script src="vendor/purify.min.js" defer></script>
+    <!-- Highlight.js for Syntax Highlighting (self-hosted 11.9.0) -->
+    <link rel="stylesheet" id="highlight-style" href="vendor/hljs/tokyo-night-dark.min.css">
+    <script src="vendor/highlight.min.js" defer></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="dark">
@@ -34,21 +32,6 @@
                 </button>
                 <button class="rail-btn" id="rail-rp-btn" data-i18n-title="roleplay" title="Roleplay">
                     <i class="fa-solid fa-masks-theater"></i>
-                </button>
-                <button class="rail-btn" id="rail-history-btn" data-i18n-title="history" title="History">
-                    <i class="fa-solid fa-clock-rotate-left"></i>
-                </button>
-                <button class="rail-btn" id="rail-config-btn" data-i18n-title="config" title="Settings">
-                    <i class="fa-solid fa-sliders"></i>
-                </button>
-            </div>
-            <div class="rail-bottom">
-                <button class="rail-btn" id="theme-toggle" title="Đổi giao diện (Sáng / Tối)">
-                    <i class="fa-solid fa-sun sun-icon"></i>
-                    <i class="fa-solid fa-moon moon-icon"></i>
-                </button>
-                <button class="rail-btn" id="open-settings-btn" title="Cài đặt">
-                    <i class="fa-solid fa-gear"></i>
                 </button>
             </div>
         </nav>
@@ -102,13 +85,10 @@
 
         <!-- 3. Main Chat Viewport -->
         <main class="chat-viewport">
-            <!-- Background Crimson Ambient Glow -->
-            <div class="ambient-glow"></div>
-
             <!-- Agent Topbar -->
             <header class="topbar">
                 <div class="topbar-left">
-                    <button class="btn-icon-mobile" id="mobile-toggle">
+                    <button class="btn-icon-mobile" id="mobile-toggle" data-i18n-title="toggleSidebar" title="Đóng/mở danh sách">
                         <i class="fa-solid fa-bars"></i>
                     </button>
                     <!-- Agent selector & badge -->
@@ -124,14 +104,9 @@
                 </div>
 
                 <div class="topbar-right">
-                    <div class="lang-switch" id="lang-switch" title="Language">
-                        <button type="button" class="lang-btn active" data-lang="vi">VI</button>
-                        <button type="button" class="lang-btn" data-lang="en">EN</button>
-                    </div>
-                    <!-- Web Search Toggle -->
-                    <button class="btn-glass-sm search-toggle" id="web-search-toggle" title="Bật/Tắt tìm kiếm Web">
-                        <i class="fa-solid fa-globe"></i> <span data-i18n="webSearch">Web Search</span>
-                        <span class="toggle-indicator" id="search-indicator">OFF</span>
+                    <!-- In-conversation search -->
+                    <button class="btn-icon-sm" id="msg-search-btn" data-i18n-title="findInChat" title="Tìm trong hội thoại">
+                        <i class="fa-solid fa-magnifying-glass"></i>
                     </button>
                     <!-- Export Dropdown -->
                     <div class="dropdown">
@@ -146,14 +121,25 @@
                         </div>
                     </div>
                     <input type="file" id="import-story-input" accept=".json,.md,.txt" style="display:none">
-                    <!-- Quick Toggle Config Drawer -->
-                    <button class="btn-icon-sm" id="topbar-config-btn" title="Bật/Tắt cấu hình nhanh">
-                        <i class="fa-solid fa-sliders"></i>
+                    <!-- Toggle Settings Modal -->
+                    <button class="btn-icon-sm" id="topbar-config-btn" data-i18n-title="config" title="Cài đặt">
+                        <i class="fa-solid fa-gear"></i>
                     </button>
                 </div>
             </header>
 
             <div class="status-banner hidden" id="status-banner" role="status"></div>
+
+            <!-- In-conversation search bar -->
+            <div class="msg-search-bar hidden" id="msg-search-bar">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="msg-search-input" data-i18n-placeholder="findInChatPh" placeholder="Tìm trong hội thoại…">
+                <span class="msg-search-count" id="msg-search-count"></span>
+                <button type="button" class="btn-icon-xs" id="msg-search-prev" title="Trước"><i class="fa-solid fa-chevron-up"></i></button>
+                <button type="button" class="btn-icon-xs" id="msg-search-next" title="Sau"><i class="fa-solid fa-chevron-down"></i></button>
+                <button type="button" class="btn-icon-xs" id="msg-search-pinned" data-i18n-title="pinnedOnly" title="Chỉ tin đã ghim"><i class="fa-solid fa-thumbtack"></i></button>
+                <button type="button" class="btn-icon-xs" id="msg-search-close" title="Đóng"><i class="fa-solid fa-xmark"></i></button>
+            </div>
 
             <!-- Messages Container -->
             <div class="messages-container" id="messages-container">
@@ -218,6 +204,14 @@
                         <i class="fa-solid fa-stop stop-icon" style="display:none;"></i>
                     </button>
                 </div>
+                <div class="context-meter ctx-ok" id="context-meter" title="Context window">
+                    <i class="fa-solid fa-gauge-high ctx-icon"></i>
+                    <div class="ctx-bar"><div class="ctx-fill" id="ctx-fill"></div></div>
+                    <span class="ctx-text" id="ctx-text">0%</span>
+                    <button type="button" class="ctx-compress-btn" id="ctx-compress-btn" data-i18n-title="compressNow" title="Nén hội thoại">
+                        <i class="fa-solid fa-compress"></i>
+                    </button>
+                </div>
                 <p class="input-meta" id="input-meta">
                     <span>Enter gửi · Shift+Enter xuống dòng · Esc dừng</span>
                     <span>Bobigo có thể sai — hãy kiểm tra kết quả quan trọng.</span>
@@ -226,121 +220,130 @@
         </main>
 
         <!-- 4. Slide-out Config Panel -->
-        <aside class="config-panel closed" id="config-panel">
-            <div class="config-header">
-                <h3 data-i18n="config">Cấu hình</h3>
-                <button class="btn-icon-sm" id="close-config-btn">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
+        <div class="modal-backdrop hidden settings-backdrop" id="config-panel" role="dialog" aria-modal="true">
+            <div class="settings-modal">
+                <nav class="settings-nav">
+                    <div class="settings-title" data-i18n="config">Cài đặt</div>
+                    <button class="settings-tab active" data-settings-tab="general"><i class="fa-solid fa-sliders"></i> <span data-i18n="setGeneral">Chung</span></button>
+                    <button class="settings-tab" data-settings-tab="appearance"><i class="fa-solid fa-palette"></i> <span data-i18n="setAppearance">Giao diện</span></button>
+                    <button class="settings-tab" data-settings-tab="model"><i class="fa-solid fa-microchip"></i> <span data-i18n="setModel">Mô hình</span></button>
+                    <button class="settings-tab" data-settings-tab="tools"><i class="fa-solid fa-screwdriver-wrench"></i> <span data-i18n="setTools">Công cụ</span></button>
+                    <button class="settings-tab" data-settings-tab="mcp"><i class="fa-solid fa-plug"></i> MCP</button>
+                    <button class="settings-tab" data-settings-tab="chat"><i class="fa-solid fa-comment"></i> <span data-i18n="setChat">Trò chuyện</span></button>
+                    <button class="settings-tab" data-settings-tab="about"><i class="fa-solid fa-circle-info"></i> <span data-i18n="setAbout">Giới thiệu</span></button>
+                </nav>
+                <div class="settings-main">
+                    <button class="btn-icon-sm settings-close" id="close-config-btn" title="Đóng"><i class="fa-solid fa-xmark"></i></button>
+                    <div class="settings-scroll">
+
+                        <section class="settings-panel active" data-settings-panel="general">
+                            <h3 class="settings-h" data-i18n="setGeneral">Chung</h3>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="lang">Ngôn ngữ</span><span class="setting-sub" data-i18n="langHint">Đổi toàn bộ giao diện và ngôn ngữ trả lời.</span></div>
+                                <div class="lang-switch" id="lang-switch-config">
+                                    <button type="button" class="lang-btn" data-lang="vi">Tiếng Việt</button>
+                                    <button type="button" class="lang-btn" data-lang="en">English</button>
+                                </div>
+                            </div>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="reset">Khôi phục mặc định</span><span class="setting-sub" data-i18n="resetHint">Đưa mọi cấu hình về ban đầu</span></div>
+                                <button class="btn-glass" id="reset-config-btn" data-i18n="reset">Khôi phục</button>
+                            </div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="appearance">
+                            <h3 class="settings-h" data-i18n="setAppearance">Giao diện</h3>
+                            <p class="settings-desc" data-i18n="themeHint">Chọn theme — cả ứng dụng đổi màu ngay lập tức.</p>
+                            <div class="theme-grid" id="theme-grid">
+                                <button type="button" class="theme-swatch" data-theme="obsidian"><span class="ts-prev" style="background:#0b0c10"><span class="ts-side" style="background:#101217"></span><span class="ts-main"><span class="ts-bar" style="background:#ef233c"></span><span class="ts-bar ts-bar2" style="background:#2a2d38"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#ef233c"></span>Obsidian</span></button>
+                                <button type="button" class="theme-swatch" data-theme="daylight"><span class="ts-prev" style="background:#faf5f6"><span class="ts-side" style="background:#f4eaec"></span><span class="ts-main"><span class="ts-bar" style="background:#e11d48"></span><span class="ts-bar ts-bar2" style="background:#e2dcde"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#e11d48"></span>Daylight</span></button>
+                                <button type="button" class="theme-swatch" data-theme="indigo"><span class="ts-prev" style="background:#0b0d15"><span class="ts-side" style="background:#0e111c"></span><span class="ts-main"><span class="ts-bar" style="background:#6d7bff"></span><span class="ts-bar ts-bar2" style="background:#242a3d"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#6d7bff"></span>Indigo</span></button>
+                                <button type="button" class="theme-swatch" data-theme="evergreen"><span class="ts-prev" style="background:#0a0f0c"><span class="ts-side" style="background:#0c120e"></span><span class="ts-main"><span class="ts-bar" style="background:#22c98a"></span><span class="ts-bar ts-bar2" style="background:#1d2a22"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#22c98a"></span>Evergreen</span></button>
+                                <button type="button" class="theme-swatch" data-theme="amethyst"><span class="ts-prev" style="background:#0e0b14"><span class="ts-side" style="background:#100c17"></span><span class="ts-main"><span class="ts-bar" style="background:#b06bff"></span><span class="ts-bar ts-bar2" style="background:#271f33"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#b06bff"></span>Amethyst</span></button>
+                                <button type="button" class="theme-swatch" data-theme="porcelain"><span class="ts-prev" style="background:#eef0f4"><span class="ts-side" style="background:#e6e9ef"></span><span class="ts-main"><span class="ts-bar" style="background:#2f6bff"></span><span class="ts-bar ts-bar2" style="background:#d3d7df"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#2f6bff"></span>Porcelain</span></button>
+                            </div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="model">
+                            <h3 class="settings-h" data-i18n="setModel">Mô hình</h3>
+                            <div class="health-card" id="health-card">
+                                <div class="health-card-title" data-i18n="engine">Engine</div>
+                                <div class="health-card-line" id="health-card-line">Đang kiểm tra llama-server…</div>
+                            </div>
+                            <div class="config-group">
+                                <label for="system-prompt-input" data-i18n="systemPrompt">System prompt</label>
+                                <textarea id="system-prompt-input" rows="4" placeholder="Lời nhắc hệ thống cho agent…"></textarea>
+                                <div class="preset-bar">
+                                    <select id="preset-select" class="config-text-input">
+                                        <option value="" data-i18n="presetPick">— Preset —</option>
+                                    </select>
+                                    <button type="button" class="btn-icon-sm" id="preset-save-btn" data-i18n-title="presetSave" title="Lưu preset"><i class="fa-solid fa-floppy-disk"></i></button>
+                                    <button type="button" class="btn-icon-sm" id="preset-del-btn" data-i18n-title="presetDelete" title="Xóa preset"><i class="fa-regular fa-trash-can"></i></button>
+                                </div>
+                            </div>
+                            <div class="config-group">
+                                <div class="config-label-row"><label for="temp-slider" data-i18n="temp">Temperature</label><span class="config-val" id="temp-val">0.70</span></div>
+                                <input type="range" id="temp-slider" min="0.0" max="1.5" step="0.05" value="0.7">
+                                <span class="config-hint" data-i18n="tempHint">Thấp = chính xác. Cao = sáng tạo.</span>
+                            </div>
+                            <div class="config-group">
+                                <div class="config-label-row"><label for="topp-slider">Top-P</label><span class="config-val" id="topp-val">0.90</span></div>
+                                <input type="range" id="topp-slider" min="0.0" max="1.0" step="0.05" value="0.9">
+                            </div>
+                            <div class="config-group">
+                                <div class="config-label-row"><label for="penalty-slider" data-i18n="penalty">Phạt lặp từ</label><span class="config-val" id="penalty-val">1.10</span></div>
+                                <input type="range" id="penalty-slider" min="1.0" max="1.5" step="0.05" value="1.1">
+                            </div>
+                            <div class="config-group">
+                                <label for="max-tokens-input" data-i18n="maxTokens">Max output tokens</label>
+                                <input type="number" id="max-tokens-input" value="4096" class="config-num-input">
+                            </div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="tools">
+                            <h3 class="settings-h" data-i18n="setTools">Công cụ</h3>
+                            <p class="settings-desc" data-i18n="toolsHint">Bobigo tự gọi các công cụ này khi cần.</p>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="agentToggle">Agent tools</span><span class="setting-sub" data-i18n="agentToggleSub">Cho phép mô hình tự gọi công cụ</span></div>
+                                <label class="switch"><input type="checkbox" id="toggle-agent" checked><span class="slider round"></span></label>
+                            </div>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="searchToggle">Tìm kiếm web</span><span class="setting-sub" data-i18n="searchToggleSub">DuckDuckGo — dùng cho dữ kiện mới</span></div>
+                                <label class="switch"><input type="checkbox" id="toggle-websearch"><span class="slider round"></span></label>
+                            </div>
+                            <div class="settings-sec" data-i18n="builtinTools">Công cụ tích hợp</div>
+                            <div id="tools-builtin-list" class="tools-list"></div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="mcp">
+                            <h3 class="settings-h">MCP — Model Context Protocol</h3>
+                            <p class="settings-desc" data-i18n="mcpHint">Kết nối server ngoài để nạp thêm công cụ vào agent.</p>
+                            <div id="mcp-servers-list" class="mcp-list"></div>
+                            <div class="mcp-add-hint" data-i18n="mcpAddHint">Thêm server bằng cách tạo <code>mcp.json</code> ở gốc repo, rồi khởi động lại.</div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="chat">
+                            <h3 class="settings-h" data-i18n="setChat">Trò chuyện</h3>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="memToggle">Ghi nhớ hội thoại</span><span class="setting-sub" data-i18n="memToggleSub">Gửi lại lịch sử tin nhắn trước đó</span></div>
+                                <label class="switch"><input type="checkbox" id="toggle-memory" checked><span class="slider round"></span></label>
+                            </div>
+                            <div class="setting-row">
+                                <div class="setting-info"><span class="setting-label" data-i18n="reasonToggle">Hiển thị ô suy luận</span><span class="setting-sub" data-i18n="reasonToggleSub">Xem tiến trình suy luận</span></div>
+                                <label class="switch"><input type="checkbox" id="toggle-reasoning" checked><span class="slider round"></span></label>
+                            </div>
+                        </section>
+
+                        <section class="settings-panel" data-settings-panel="about">
+                            <h3 class="settings-h" data-i18n="setAbout">Giới thiệu</h3>
+                            <div class="about-brand"><img src="logo.png" alt="Bobigo" class="about-logo"><div><div class="about-name">Bobigo AI Studio</div><div class="settings-sub2" data-i18n="aboutTag">Chat &amp; Roleplay cục bộ · 100% offline</div></div></div>
+                            <div class="setting-row"><div class="setting-info"><span class="setting-label" data-i18n="privacy">Quyền riêng tư</span><span class="setting-sub" data-i18n="privacySub">Dữ liệu không rời khỏi máy của bạn</span></div><span class="engine-badge">Offline</span></div>
+                        </section>
+
+                    </div>
+                </div>
             </div>
-
-            <div class="config-body">
-                <div class="config-group">
-                    <label data-i18n="lang">Ngôn ngữ / Language</label>
-                    <div class="lang-switch lang-switch-wide" id="lang-switch-config">
-                        <button type="button" class="lang-btn" data-lang="vi">Tiếng Việt</button>
-                        <button type="button" class="lang-btn" data-lang="en">English</button>
-                    </div>
-                    <span class="config-hint" data-i18n="langHint">Đổi toàn bộ giao diện và ngôn ngữ trả lời. Bot chỉ cần biết mình là Bobigo.</span>
-                </div>
-
-                <div class="health-card" id="health-card">
-                    <div class="health-card-title" data-i18n="engine">Engine</div>
-                    <div class="health-card-line" id="health-card-line">Đang kiểm tra llama-server…</div>
-                </div>
-
-                <!-- System Prompt -->
-                <div class="config-group">
-                    <label for="system-prompt-input" data-i18n="systemPrompt">System prompt</label>
-                    <textarea id="system-prompt-input" rows="4" placeholder="Lời nhắc hệ thống cho agent…"></textarea>
-                </div>
-
-                <!-- Temperature -->
-                <div class="config-group">
-                    <div class="config-label-row">
-                        <label for="temp-slider" data-i18n="temp">Temperature</label>
-                        <span class="config-val" id="temp-val">0.70</span>
-                    </div>
-                    <input type="range" id="temp-slider" min="0.0" max="1.5" step="0.05" value="0.7">
-                    <span class="config-hint" data-i18n="tempHint">Thấp = chính xác. Cao = sáng tạo.</span>
-                </div>
-
-                <!-- Top P -->
-                <div class="config-group">
-                    <div class="config-label-row">
-                        <label for="topp-slider">Top-P (Nucleus Sampling)</label>
-                        <span class="config-val" id="topp-val">0.90</span>
-                    </div>
-                    <input type="range" id="topp-slider" min="0.0" max="1.0" step="0.05" value="0.9">
-                </div>
-
-                <!-- Repeat Penalty -->
-                <div class="config-group">
-                    <div class="config-label-row">
-                        <label for="penalty-slider">Repeat Penalty (Phạt lặp từ)</label>
-                        <span class="config-val" id="penalty-val">1.10</span>
-                    </div>
-                    <input type="range" id="penalty-slider" min="1.0" max="1.5" step="0.05" value="1.1">
-                </div>
-
-                <!-- Max Tokens -->
-                <div class="config-group">
-                    <label for="max-tokens-input" data-i18n="maxTokens">Max output tokens</label>
-                    <input type="number" id="max-tokens-input" value="4096" class="config-num-input">
-                </div>
-
-                <hr class="config-divider">
-
-                <!-- Toggles -->
-                <div class="config-toggle-row">
-                    <div class="toggle-info">
-                        <span class="toggle-label" data-i18n="memToggle">Ghi nhớ hội thoại</span>
-                        <span class="toggle-sub" data-i18n="memToggleSub">Gửi lại lịch sử tin nhắn trước đó</span>
-                    </div>
-                    <label class="switch">
-                        <input type="checkbox" id="toggle-memory" checked>
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-
-                <div class="config-toggle-row">
-                    <div class="toggle-info">
-                        <span class="toggle-label" data-i18n="reasonToggle">Hiển thị ô suy luận</span>
-                        <span class="toggle-sub" data-i18n="reasonToggleSub">Xem tiến trình suy luận</span>
-                    </div>
-                    <label class="switch">
-                        <input type="checkbox" id="toggle-reasoning" checked>
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-
-                <div class="config-toggle-row">
-                    <div class="toggle-info">
-                        <span class="toggle-label" data-i18n="searchToggle">Tìm kiếm web</span>
-                        <span class="toggle-sub" data-i18n="searchToggleSub">Khi tắt Agent: search rồi nhét vào prompt</span>
-                    </div>
-                    <label class="switch">
-                        <input type="checkbox" id="toggle-websearch">
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-
-                <div class="config-toggle-row">
-                    <div class="toggle-info">
-                        <span class="toggle-label" data-i18n="agentToggle">Agent tools</span>
-                        <span class="toggle-sub" data-i18n="agentToggleSub">Search, calculator, Python, URL, đọc file</span>
-                    </div>
-                    <label class="switch">
-                        <input type="checkbox" id="toggle-agent" checked>
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-            </div>
-
-            <div class="config-footer">
-                <button class="btn-glass" id="reset-config-btn" data-i18n="reset">Khôi phục mặc định</button>
-            </div>
-        </aside>
+        </div>
     </div>
 
     <!-- Character / setting editor -->
@@ -378,6 +381,6 @@
 
     <script src="i18n.js" defer></script>
     <script src="roleplay.js" defer></script>
-    <script src="app.js" defer></script>
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>

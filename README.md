@@ -43,6 +43,50 @@
 
 ---
 
+## 🔌 Công cụ & MCP (Model Context Protocol)
+
+### Công cụ tích hợp (Bobigo tự gọi khi cần)
+
+| Tool | Chức năng | Giới hạn an toàn |
+|------|-----------|------------------|
+| `web_search` | Tìm web qua DuckDuckGo HTML | Ẩn danh, tối đa 10 kết quả |
+| `calculator` | Tính biểu thức toán học | AST an toàn, **không `eval`** |
+| `code_interpreter` | Chạy Python | Sandbox cô lập (`-I`), chặn reflection/dunder, **timeout 15s**, không mạng/không file |
+| `url_reader` | Đọc văn bản trang web | Chặn SSRF (loopback/IP nội bộ), giới hạn dung lượng |
+| `list_files` / `read_file` | Duyệt & đọc file trong repo | Chặn `.env`, khóa, thư mục nhạy cảm |
+
+> Xem đầy đủ ngay trong app: nút **Công cụ & MCP** (biểu tượng cờ-lê) trên thanh điều hướng.
+
+### Kết nối MCP server ngoài
+
+Bobigo là một **MCP client**: tạo `mcp.json` ở gốc repo để nạp thêm tool từ các MCP server (stdio). Tool của chúng được đưa vào agent loop dưới tên `mcp_<server>_<tool>`.
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/duong/dan/cho/phep"]
+    }
+  }
+}
+```
+
+> ⚠️ **Bảo mật:** MCP server chạy như tiến trình con với quyền của bạn. Chỉ khai báo server tin cậy. Không có `mcp.json` → tính năng tắt hoàn toàn (mặc định). File này được `.gitignore`.
+
+---
+
+## 🧠 Quản lý Context & Trải nghiệm Chat Hiện đại
+
+* **Đồng hồ Context Window:** thanh đo % token đã dùng theo thời gian thực, cảnh báo khi gần đầy.
+* **Tự động nén hội thoại:** khi vượt ngưỡng, Bobigo tóm tắt phần cũ thành *bản ghi nhớ* (giữ sự kiện/quyết định/tên) rồi lưu lại — không lặp lại việc tóm tắt mỗi lượt. Có thể nén thủ công bằng nút nén.
+* **Tìm trong hội thoại & Ghim:** tìm tức thời trong đoạn chat, điều hướng kết quả, ghim tin quan trọng và lọc "chỉ tin đã ghim".
+* **Thư viện Prompt:** lưu **system-prompt preset** tái dùng; **slash-command** (`/summarize`, `/translate`, `/bullets`…) ngay trong ô nhập.
+* **Regenerate nâng cao:** tạo lại với mức nhiệt độ khác (sáng tạo hơn / chính xác hơn) và **so sánh nhiều phiên bản** trả lời bằng bộ chuyển `‹ 2/2 ›`.
+* **Offline 100%:** toàn bộ font, icon và thư viện JS được **self-host** trong `web/vendor/` — không phụ thuộc CDN.
+
+---
+
 ## 📁 Cấu trúc Thư mục Dự án
 
 ```
@@ -61,20 +105,30 @@ Chatbot_v1/
 │   ├── agent/              # ReAct Agent Core
 │   │   ├── loop.py         # Vòng lặp Agent & SSE Streamer
 │   │   ├── parse.py        # Parser bóc tách tool calls từ output LLM
-│   │   └── context.py      # Quản lý Context Window & Token Budget
+│   │   ├── context.py      # Quản lý Context Window & Token Budget
+│   │   └── compress.py     # Tóm tắt (nén) hội thoại cũ bằng LLM
+│   ├── mcp/                # MCP client (kết nối server ngoài qua stdio)
+│   │   ├── client.py       # JSON-RPC 2.0 stdio client
+│   │   └── manager.py      # Quản lý server + gộp tool vào agent
 │   └── tools/              # Bộ công cụ Agent (Tools)
 │       ├── calculator.py   # Safe AST Math Evaluator
 │       ├── code_interpreter.py # Python Sandbox Execution
 │       ├── files.py        # Local File Operations
 │       ├── url_reader.py   # Web Content Scraper & SSRF Filter
 │       └── web_search.py   # DuckDuckGo HTML Search
-├── tests/                  # Bộ kiểm thử Unit Test (41 test cases)
+├── mcp.json                # (Tùy chọn) Cấu hình MCP server — gitignored
+├── tests/                  # Bộ kiểm thử Unit Test (57 test cases)
 ├── web/                    # Giao diện Web Frontend
 │   ├── index.html          # Cấu trúc HTML giao diện
 │   ├── style.css           # Hệ thống Style & Themes
-│   ├── app.js              # State Management, SSE Parser & DOM Logic
 │   ├── i18n.js             # Từ điển Song ngữ (VI/EN)
 │   ├── roleplay.js         # Quản lý Trạng thái Roleplay & Ký ức
+│   ├── js/                 # Frontend ES modules
+│   │   ├── main.js         # Wire DOM, streaming, state
+│   │   ├── api.js · config.js · markdown.js · util.js · tokens.js
+│   │   └── features/       # contextMeter, messageSearch, promptLibrary,
+│   │       │                 regenerate variants, toolsPanel
+│   ├── vendor/             # Thư viện self-host (fonts, FA, marked, hljs…)
 │   └── logo.png            # Logo Bobigo Avatar Retina 512x512
 └── scripts/
     └── start_backend.sh    # Script khởi chạy llama-server với Metal GPU
@@ -109,7 +163,7 @@ Script sẽ tự động:
 
 ## 🧪 Chạy Kiểm thử Tự động (Testing)
 
-Dự án đi kèm bộ 41 unit tests kiểm tra toàn diện tính an toàn của Calculator AST, Code Sandbox, Tool Parsing, Context Trimming, URL Filtering và Roleplay Prompts:
+Dự án đi kèm bộ 57 unit tests kiểm tra toàn diện tính an toàn của Calculator AST, Code Sandbox, Tool Parsing, Context Trimming, Compression, MCP client, URL Filtering và Roleplay Prompts:
 
 ```bash
 .venv/bin/pytest -v

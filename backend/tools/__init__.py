@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Awaitable, Callable
 
@@ -121,7 +122,9 @@ async def _calculator(args: dict[str, Any], client: httpx.AsyncClient | None) ->
 
 async def _code_interpreter(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
     del client
-    return run_python(str(args.get("code", "")))
+    # run_python spawns a subprocess and blocks up to CODE_EXEC_TIMEOUT seconds;
+    # keep it off the event loop so other streams are not frozen.
+    return await asyncio.to_thread(run_python, str(args.get("code", "")))
 
 
 async def _url_reader(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
@@ -130,12 +133,14 @@ async def _url_reader(args: dict[str, Any], client: httpx.AsyncClient | None) ->
 
 async def _list_files(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
     del client
-    return list_workspace_files(str(args.get("path") or "."), str(args.get("pattern") or "*"))
+    return await asyncio.to_thread(
+        list_workspace_files, str(args.get("path") or "."), str(args.get("pattern") or "*")
+    )
 
 
 async def _read_file(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
     del client
-    return read_workspace_file(str(args.get("path", "")))
+    return await asyncio.to_thread(read_workspace_file, str(args.get("path", "")))
 
 
 _HANDLERS: dict[str, ToolHandler] = {
@@ -148,7 +153,12 @@ _HANDLERS: dict[str, ToolHandler] = {
 }
 
 
-def tool_schemas() -> list[dict[str, Any]]:
+def tool_schemas(mcp: Any = None) -> list[dict[str, Any]]:
+    if mcp is not None:
+        try:
+            return SCHEMAS + mcp.list_tools()
+        except Exception:  # noqa: BLE001 — never let MCP break the built-ins
+            return SCHEMAS
     return SCHEMAS
 
 
@@ -160,7 +170,19 @@ async def execute_tool(
     name: str,
     arguments: dict[str, Any] | str | None,
     client: httpx.AsyncClient | None = None,
+    mcp: Any = None,
 ) -> str:
+    if mcp is not None and getattr(mcp, "is_mcp_tool", None) and mcp.is_mcp_tool(name):
+        parsed_mcp = arguments
+        if isinstance(arguments, str):
+            try:
+                parsed_mcp = json.loads(arguments.strip() or "{}")
+            except json.JSONDecodeError:
+                parsed_mcp = {}
+        elif not isinstance(arguments, dict):
+            parsed_mcp = {}
+        return await mcp.call(name, parsed_mcp)
+
     handler = _HANDLERS.get(name)
     if handler is None:
         return f"Lỗi: không có tool '{name}'"

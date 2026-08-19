@@ -155,6 +155,7 @@ async def stream_agent(
     llm_stream: LlmStreamer | None = None,
     tool_runner: ToolRunner | None = None,
     http_client: httpx.AsyncClient | None = None,
+    mcp: Any = None,
 ) -> AsyncIterator[str]:
     agent_tools = body.get("agent_tools", True) is not False
     messages = prepare_messages(
@@ -164,7 +165,7 @@ async def stream_agent(
         agent_tools=agent_tools,
     )
     model = body.get("model") or DEFAULT_MODEL
-    runner = tool_runner or (lambda n, a: execute_tool(n, a, http_client))
+    runner = tool_runner or (lambda n, a: execute_tool(n, a, http_client, mcp))
 
     async def _llm(payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         if llm_stream is not None:
@@ -187,7 +188,7 @@ async def stream_agent(
                 "stream": True,
             }
             if agent_tools:
-                payload["tools"] = tool_schemas()
+                payload["tools"] = tool_schemas(mcp)
                 payload["tool_choice"] = "auto"
             if body.get("repeat_penalty") is not None:
                 payload["repeat_penalty"] = body["repeat_penalty"]

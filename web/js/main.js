@@ -3,6 +3,15 @@
  * Web Search + Streaming Chat + Memory + Config Panel
  */
 
+import { escapeHtml, renderMarkdown } from "./markdown.js";
+import { formatFileSize, relativeTime, downloadFile, refineSearchQuery } from "./util.js";
+import { loadConfig, persistConfig } from "./config.js";
+import { API_URL, HEALTH_URL, SEARCH_URL, performWebSearch, postCompress, getToolsCatalog } from "./api.js";
+import { conversationTokens } from "./tokens.js";
+import { initContextMeter } from "./features/contextMeter.js";
+import { initMessageSearch } from "./features/messageSearch.js";
+import { loadPresets, savePresets, attachSlashCommands } from "./features/promptLibrary.js";
+
 document.addEventListener("DOMContentLoaded", () => {
     // --------------------------------------------------------------------------
     // DOM Elements
@@ -15,7 +24,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const navRailBtns = document.querySelectorAll(".rail-btn");
     const railChatBtn = document.getElementById("rail-chat-btn");
     const railRpBtn = document.getElementById("rail-rp-btn");
-    const railHistoryBtn = document.getElementById("rail-history-btn");
     const railConfigBtn = document.getElementById("rail-config-btn");
     const openSettingsBtn = document.getElementById("open-settings-btn");
     
@@ -76,9 +84,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // --------------------------------------------------------------------------
     // App State & Persistence
     // --------------------------------------------------------------------------
-    const API_URL = "/v1/chat/completions";
-    const HEALTH_URL = "/api/health";
-    const SEARCH_URL = "/api/websearch";
     const MAX_ATTACH_BYTES = 80 * 1024;
 
     let sessions = loadSessions();
@@ -88,6 +93,23 @@ document.addEventListener("DOMContentLoaded", () => {
     let isGenerating = false;
     let activeGenerations = new Map(); // sessionId -> { abortController, assistantMsgObj }
     let llmReady = false;
+    let currentModel = "qwen35b-uncensored"; // updated from /api/health once known
+    let contextInfo = { window: 8192, reserve: 2048 }; // from /api/health
+    let isCompressing = false;
+    let contextMeter = null; // assigned once DOM refs exist (see init below)
+
+    // Themes: each = a base family (dark/light) + optional accent class.
+    // Declared here (before initTheme runs) to avoid a TDZ error at boot.
+    const THEMES = {
+        obsidian:  { family: "dark",  accent: null,              label: "Obsidian" },
+        daylight:  { family: "light", accent: null,              label: "Daylight" },
+        indigo:    { family: "dark",  accent: "theme-indigo",    label: "Indigo" },
+        evergreen: { family: "dark",  accent: "theme-evergreen", label: "Evergreen" },
+        amethyst:  { family: "dark",  accent: "theme-amethyst",  label: "Amethyst" },
+        porcelain: { family: "light", accent: "theme-porcelain", label: "Porcelain" },
+    };
+    const THEME_CLASSES = ["dark", "light", "theme-indigo", "theme-evergreen", "theme-amethyst", "theme-porcelain"];
+    let currentTheme = "obsidian";
     let appMode = "chat";
     let worlds = (window.BobigoRP && BobigoRP.loadWorlds()) || [];
     let currentWorldId = null;
@@ -213,34 +235,287 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(checkHealth, 10000);
 
     // --------------------------------------------------------------------------
-    // Theme Switcher (Dark / Light)
+    // Context meter + auto-compression
     // --------------------------------------------------------------------------
-    function initTheme() {
-        const savedTheme = localStorage.getItem("bobigo_theme") || "dark";
-        setTheme(savedTheme);
+    contextMeter = initContextMeter({
+        root: document.getElementById("context-meter"),
+        fill: document.getElementById("ctx-fill"),
+        text: document.getElementById("ctx-text"),
+        getBudget: () => contextInfo.window - contextInfo.reserve,
+    });
+    updateContextMeter();
+
+    function currentSystemPrompt() {
+        return appMode === "roleplay" ? "" : (config.systemPrompt || "");
     }
 
-    function setTheme(theme) {
-        if (theme === "light") {
-            body.classList.remove("dark");
-            body.classList.add("light");
-            if (highlightStyle) {
-                highlightStyle.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css";
+    function updateContextMeter() {
+        if (!contextMeter) return; // not yet initialized (early renders during boot)
+        const session = getActiveSession();
+        contextMeter.update((session && session.messages) || [], currentSystemPrompt());
+    }
+
+    const COMPRESS_KEEP_RECENT = 4; // last N messages kept verbatim
+
+    async function maybeAutoCompress(session) {
+        if (!config.memory || isCompressing || !session) return;
+        const budget = Math.max(512, contextInfo.window - contextInfo.reserve);
+        const used = conversationTokens(session.messages, currentSystemPrompt());
+        if (used < budget * 0.9) return;
+        await compressSession(session, { silent: true });
+    }
+
+    async function compressSession(session, opts = {}) {
+        if (isCompressing || !session || !Array.isArray(session.messages)) return;
+        if (session.messages.length <= COMPRESS_KEEP_RECENT + 1) return;
+        isCompressing = true;
+        try {
+            const head = session.messages.slice(0, session.messages.length - COMPRESS_KEEP_RECENT);
+            const tail = session.messages.slice(session.messages.length - COMPRESS_KEEP_RECENT);
+            const i18n = window.BobigoI18n;
+            const lang = config.language || "vi";
+            const res = await postCompress(head, { keepRecent: 0, language: lang, model: currentModel });
+            if (!res || !res.summary) return;
+            const label = (i18n && i18n.t(lang, "memoryNote")) || "Bản ghi nhớ";
+            const node = {
+                role: "system",
+                content: `[${label}]\n${res.summary}`,
+                summary: true,
+                count: res.compressed_count || head.length,
+                createdAt: new Date().toISOString(),
+            };
+            session.messages = [node, ...tail];
+            saveSessions();
+            if (currentSessionId === session.id) {
+                renderCurrentSession();
+                updateContextMeter();
             }
-        } else {
-            body.classList.remove("light");
-            body.classList.add("dark");
-            if (highlightStyle) {
-                highlightStyle.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css";
+        } catch (err) {
+            console.warn("Compression failed:", err);
+            if (!opts.silent) {
+                const i18n = window.BobigoI18n;
+                const lang = config.language || "vi";
+                alert((i18n && i18n.t(lang, "compressFailed")) || "Nén hội thoại thất bại.");
+            }
+        } finally {
+            isCompressing = false;
+        }
+    }
+
+    document.getElementById("ctx-compress-btn")?.addEventListener("click", () => {
+        if (!llmReady) return;
+        compressSession(getActiveSession(), { silent: false });
+    });
+
+    // --------------------------------------------------------------------------
+    // In-conversation search + pinned filter
+    // --------------------------------------------------------------------------
+    const msgSearchBar = document.getElementById("msg-search-bar");
+    const msgSearchInput = document.getElementById("msg-search-input");
+    const msgSearch = initMessageSearch({
+        container: messagesContainer,
+        input: msgSearchInput,
+        countEl: document.getElementById("msg-search-count"),
+    });
+
+    function openMsgSearch() {
+        if (!msgSearchBar) return;
+        msgSearchBar.classList.remove("hidden");
+        msgSearchInput.focus();
+        msgSearchInput.select();
+    }
+    function closeMsgSearch() {
+        if (!msgSearchBar) return;
+        msgSearchBar.classList.add("hidden");
+        msgSearch.clear();
+        msgSearchInput.value = "";
+    }
+    document.getElementById("msg-search-btn")?.addEventListener("click", () => {
+        if (msgSearchBar && msgSearchBar.classList.contains("hidden")) openMsgSearch();
+        else closeMsgSearch();
+    });
+    document.getElementById("msg-search-close")?.addEventListener("click", closeMsgSearch);
+    document.getElementById("msg-search-prev")?.addEventListener("click", () => msgSearch.next(-1));
+    document.getElementById("msg-search-next")?.addEventListener("click", () => msgSearch.next(1));
+    document.getElementById("msg-search-pinned")?.addEventListener("click", (e) => {
+        const on = msgSearch.togglePinned();
+        e.currentTarget.classList.toggle("active", on);
+    });
+    if (msgSearchInput) {
+        msgSearchInput.addEventListener("input", () => msgSearch.run());
+        msgSearchInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); msgSearch.next(e.shiftKey ? -1 : 1); }
+            if (e.key === "Escape") { e.preventDefault(); closeMsgSearch(); }
+        });
+    }
+
+    // --------------------------------------------------------------------------
+    // Prompt library: system-prompt presets + slash commands
+    // --------------------------------------------------------------------------
+    const presetSelect = document.getElementById("preset-select");
+
+    function refreshPresetSelect() {
+        if (!presetSelect) return;
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const pick = (i18n && i18n.t(lang, "presetPick")) || "— Preset —";
+        const presets = loadPresets();
+        presetSelect.innerHTML = `<option value="">${escapeHtml(pick)}</option>` +
+            presets.map((p, i) => `<option value="${i}">${escapeHtml(p.name)}</option>`).join("");
+    }
+    refreshPresetSelect();
+
+    presetSelect?.addEventListener("change", () => {
+        const idx = parseInt(presetSelect.value, 10);
+        const presets = loadPresets();
+        if (Number.isInteger(idx) && presets[idx]) {
+            config.systemPrompt = presets[idx].prompt;
+            if (systemPromptInput) systemPromptInput.value = presets[idx].prompt;
+            saveConfig();
+        }
+    });
+
+    document.getElementById("preset-save-btn")?.addEventListener("click", () => {
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const name = prompt((i18n && i18n.t(lang, "presetName")) || "Tên preset:");
+        if (!name) return;
+        const presets = loadPresets();
+        const existing = presets.findIndex((p) => p.name === name);
+        const entry = { name: name.trim(), prompt: (systemPromptInput?.value || config.systemPrompt || "").trim() };
+        if (existing >= 0) presets[existing] = entry;
+        else presets.push(entry);
+        savePresets(presets);
+        refreshPresetSelect();
+        presetSelect.value = String(presets.findIndex((p) => p.name === entry.name));
+    });
+
+    document.getElementById("preset-del-btn")?.addEventListener("click", () => {
+        const idx = parseInt(presetSelect?.value, 10);
+        const presets = loadPresets();
+        if (!Number.isInteger(idx) || !presets[idx]) return;
+        presets.splice(idx, 1);
+        savePresets(presets);
+        refreshPresetSelect();
+    });
+
+    attachSlashCommands({ input: userInput, getLang: () => config.language || "vi" });
+
+    // --------------------------------------------------------------------------
+    // Settings modal: tabs, theme swatches, tools/MCP catalog
+    // --------------------------------------------------------------------------
+    document.querySelectorAll(".settings-tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+            const key = tab.getAttribute("data-settings-tab");
+            document.querySelectorAll(".settings-tab").forEach((t) => t.classList.toggle("active", t === tab));
+            document.querySelectorAll(".settings-panel").forEach((p) => {
+                p.classList.toggle("active", p.getAttribute("data-settings-panel") === key);
+            });
+        });
+    });
+
+    document.querySelectorAll(".theme-swatch").forEach((sw) => {
+        sw.addEventListener("click", () => setTheme(sw.getAttribute("data-theme")));
+    });
+
+    // Close settings when clicking the dimmed backdrop.
+    if (configPanel) {
+        configPanel.addEventListener("click", (e) => {
+            if (e.target === configPanel) closeConfigDrawer();
+        });
+    }
+
+    const TOOL_NOTES = {
+        vi: {
+            web_search: "Tìm web qua DuckDuckGo · dữ kiện mới",
+            calculator: "Toán học AST an toàn (không eval)",
+            code_interpreter: "Python sandbox · timeout 15s",
+            url_reader: "Đọc trang web · chặn SSRF",
+            list_files: "Liệt kê file trong workspace",
+            read_file: "Đọc file text/PDF trong workspace",
+        },
+        en: {
+            web_search: "Web search via DuckDuckGo · fresh facts",
+            calculator: "Safe AST math (no eval)",
+            code_interpreter: "Python sandbox · 15s timeout",
+            url_reader: "Read web pages · blocks SSRF",
+            list_files: "List workspace files",
+            read_file: "Read workspace text/PDF files",
+        },
+    };
+
+    let settingsCatalogLoaded = false;
+    async function refreshSettingsCatalog() {
+        if (settingsCatalogLoaded) return; // fetch once per session
+        const toolsEl = document.getElementById("tools-builtin-list");
+        const mcpEl = document.getElementById("mcp-servers-list");
+        if (!toolsEl && !mcpEl) return;
+        const lang = config.language || "vi";
+        const notes = TOOL_NOTES[lang] || TOOL_NOTES.vi;
+        const data = await getToolsCatalog();
+        settingsCatalogLoaded = true;
+        if (toolsEl) {
+            toolsEl.innerHTML = (data.builtin || []).map((t) => `
+                <div class="tool-entry">
+                    <div class="tool-entry-name"><i class="fa-solid fa-wrench"></i> ${escapeHtml(t.name || "")}</div>
+                    <div class="tool-entry-desc">${escapeHtml(notes[t.name] || t.description || "")}</div>
+                </div>`).join("");
+        }
+        if (mcpEl) {
+            const servers = data.servers || [];
+            if (!servers.length) {
+                mcpEl.innerHTML = `<div class="mcp-empty">${lang === "en" ? "No MCP servers connected." : "Chưa kết nối MCP server nào."}</div>`;
+            } else {
+                mcpEl.innerHTML = servers.map((s) => `
+                    <div class="mcp-server">
+                        <div class="mcp-head">
+                            <span class="mcp-dot ${s.connected ? "ok" : "off"}"></span>
+                            <strong>${escapeHtml(s.name || "")}</strong>
+                            <span class="mcp-status">${s.connected ? ((s.tools || []).length + " tools") : escapeHtml(s.error || "offline")}</span>
+                        </div>
+                        ${(s.tools || []).length ? `<div class="mcp-tools">${(s.tools || []).map((t) => `<span class="chiptag">${escapeHtml(t.name || "")}</span>`).join("")}</div>` : ""}
+                    </div>`).join("");
             }
         }
-        localStorage.setItem("bobigo_theme", theme);
     }
 
-    themeToggle.addEventListener("click", () => {
-        const current = body.classList.contains("light") ? "light" : "dark";
-        setTheme(current === "light" ? "dark" : "light");
-    });
+    // --------------------------------------------------------------------------
+    // Theme Switcher (multi-theme)
+    // --------------------------------------------------------------------------
+    function normalizeTheme(name) {
+        if (name === "dark") return "obsidian";
+        if (name === "light") return "daylight";
+        return THEMES[name] ? name : "obsidian";
+    }
+
+    function initTheme() {
+        setTheme(normalizeTheme(localStorage.getItem("bobigo_theme") || "obsidian"));
+    }
+
+    function setTheme(name) {
+        const theme = THEMES[name] || THEMES.obsidian;
+        currentTheme = THEMES[name] ? name : "obsidian";
+        body.classList.remove(...THEME_CLASSES);
+        body.classList.add(theme.family);
+        if (theme.accent) body.classList.add(theme.accent);
+        if (highlightStyle) {
+            highlightStyle.href = theme.family === "light"
+                ? "vendor/hljs/github.min.css"
+                : "vendor/hljs/tokyo-night-dark.min.css";
+        }
+        localStorage.setItem("bobigo_theme", currentTheme);
+        document.querySelectorAll(".theme-swatch").forEach((s) => {
+            s.classList.toggle("active", s.getAttribute("data-theme") === currentTheme);
+        });
+    }
+
+    // Quick sun/moon toggle flips between the light and dark signature themes (if present).
+    if (themeToggle) {
+        themeToggle.addEventListener("click", () => {
+            const isLight = (THEMES[currentTheme] || THEMES.obsidian).family === "light";
+            setTheme(isLight ? "obsidian" : "daylight");
+        });
+    }
 
     // --------------------------------------------------------------------------
     // Navigation Rail & Drawer Controllers (Responsive)
@@ -251,7 +526,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function syncSidebarOverlay() {
         if (!sidebarOverlay) return;
-        const isAnyOpen = (!historyPanel.classList.contains("closed") || !configPanel.classList.contains("closed") || document.body.classList.contains("sidebar-open") || document.body.classList.contains("config-open"));
+        const isAnyOpen = (!historyPanel.classList.contains("closed") || document.body.classList.contains("sidebar-open"));
         if (isMobile() && isAnyOpen) {
             sidebarOverlay.classList.remove("hidden");
             sidebarOverlay.classList.add("active");
@@ -276,31 +551,30 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function toggleHistoryDrawer() {
-        if (historyPanel.classList.contains("closed") || !document.body.classList.contains("sidebar-open")) {
+        // Use the panel's own state as the single source of truth so the first
+        // click always matches what the user sees (avoids the double-click desync
+        // when body.sidebar-open and .closed disagreed on desktop).
+        if (historyPanel.classList.contains("closed")) {
             openHistoryDrawer();
         } else {
             closeHistoryDrawer();
         }
     }
 
+    // Settings is now a centered modal (its own backdrop), not a slide-out.
     function openConfigDrawer() {
-        configPanel.classList.remove("closed");
-        if (isMobile()) {
-            historyPanel.classList.add("closed");
-            document.body.classList.remove("sidebar-open");
-        }
+        configPanel.classList.remove("hidden");
         document.body.classList.add("config-open");
-        syncSidebarOverlay();
+        if (typeof refreshSettingsCatalog === "function") refreshSettingsCatalog();
     }
 
     function closeConfigDrawer() {
-        configPanel.classList.add("closed");
+        configPanel.classList.add("hidden");
         document.body.classList.remove("config-open");
-        syncSidebarOverlay();
     }
 
     function toggleConfigDrawer() {
-        if (configPanel.classList.contains("closed")) {
+        if (configPanel.classList.contains("hidden")) {
             openConfigDrawer();
         } else {
             closeConfigDrawer();
@@ -309,7 +583,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function closeAllDrawers() {
         historyPanel.classList.add("closed");
-        configPanel.classList.add("closed");
+        configPanel.classList.add("hidden");
         document.body.classList.remove("sidebar-open", "config-open");
         if (sidebarOverlay) {
             sidebarOverlay.classList.remove("active");
@@ -342,24 +616,23 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    railHistoryBtn.addEventListener("click", () => {
-        setNavActive(railHistoryBtn);
-        toggleHistoryDrawer();
-    });
+    if (railConfigBtn) {
+        railConfigBtn.addEventListener("click", () => {
+            setNavActive(railConfigBtn);
+            toggleConfigDrawer();
+        });
+    }
 
-    railConfigBtn.addEventListener("click", () => {
-        setNavActive(railConfigBtn);
-        toggleConfigDrawer();
-    });
-
-    openSettingsBtn.addEventListener("click", () => {
-        setNavActive(railConfigBtn);
-        openConfigDrawer();
-    });
+    if (openSettingsBtn) {
+        openSettingsBtn.addEventListener("click", () => {
+            if (railConfigBtn) setNavActive(railConfigBtn);
+            openConfigDrawer();
+        });
+    }
 
     closeConfigBtn.addEventListener("click", () => {
         closeConfigDrawer();
-        setNavActive(railChatBtn);
+        setNavActive(appMode === "roleplay" ? railRpBtn : railChatBtn);
     });
 
     topbarConfigBtn.addEventListener("click", () => {
@@ -389,23 +662,20 @@ document.addEventListener("DOMContentLoaded", () => {
     // --------------------------------------------------------------------------
     // Web Search Toggle
     // --------------------------------------------------------------------------
-    webSearchToggle.addEventListener("click", () => {
-        config.webSearch = !config.webSearch;
-        saveConfig();
-        syncWebSearchUI();
-    });
+    // Web search now lives in Settings → Tools; keep this resilient if the old
+    // topbar toggle is absent.
+    if (webSearchToggle) {
+        webSearchToggle.addEventListener("click", () => {
+            config.webSearch = !config.webSearch;
+            saveConfig();
+            syncWebSearchUI();
+        });
+    }
 
     function syncWebSearchUI() {
-        if (config.webSearch) {
-            webSearchToggle.classList.add("active");
-            searchIndicator.textContent = "ON";
-        } else {
-            webSearchToggle.classList.remove("active");
-            searchIndicator.textContent = "OFF";
-        }
-        if (toggleWebsearch) {
-            toggleWebsearch.checked = config.webSearch;
-        }
+        if (webSearchToggle) webSearchToggle.classList.toggle("active", !!config.webSearch);
+        if (searchIndicator) searchIndicator.textContent = config.webSearch ? "ON" : "OFF";
+        if (toggleWebsearch) toggleWebsearch.checked = config.webSearch;
     }
 
     // --------------------------------------------------------------------------
@@ -445,6 +715,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 statusBanner.textContent = "";
             }
         }
+        if (data && data.model) currentModel = data.model;
+        if (data && Number.isFinite(data.context_window)) contextInfo.window = data.context_window;
+        if (data && Number.isFinite(data.reply_reserve)) contextInfo.reserve = data.reply_reserve;
+        updateContextMeter();
         if (healthCardLine) {
             const model = (data && data.model) || "—";
             const jinja = data && data.jinja_known ? (data.jinja ? "jinja ✓" : "jinja ✗") : "jinja ?";
@@ -504,44 +778,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // --------------------------------------------------------------------------
     // Web Search Function
     // --------------------------------------------------------------------------
-    function refineSearchQuery(text) {
-        let q = String(text || "").replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
-        const sentence = q.split(/(?<=[.!?。？！])\s+/)[0] || q;
-        q = sentence.length > 160 ? sentence.slice(0, 160) : sentence;
-        return q;
-    }
-
-    async function performWebSearch(query, signal) {
-        try {
-            const res = await fetch(SEARCH_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ query: query, max_results: 5 }),
-                signal
-            });
-
-            if (!res.ok) throw new Error(`Search HTTP ${res.status}`);
-
-            const data = await res.json();
-            return data.results || [];
-        } catch (e) {
-            if (e && e.name === "AbortError") throw e;
-            console.error("Web search error:", e);
-            return [];
-        }
-    }
-
-    function renderMarkdown(text) {
-        if (typeof marked === "undefined") {
-            return escapeHtml(text);
-        }
-        const html = marked.parse(text);
-        if (typeof DOMPurify !== "undefined") {
-            return DOMPurify.sanitize(html);
-        }
-        return html;
-    }
-
     function buildToolEventsHTML(events, collapsed) {
         if (!events || events.length === 0) return "";
         const i18n = window.BobigoI18n;
@@ -813,7 +1049,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         filtered.forEach((world) => {
             const item = document.createElement("div");
-            item.className = `history-item ${world.id === currentWorldId ? "active" : ""}`;
+            const genning = activeGenerations.has(world.id) ? "is-generating" : "";
+            item.className = `history-item ${world.id === currentWorldId ? "active" : ""} ${genning}`;
             const charLabel = i18n ? i18n.t(lang, "charCount") : "nhân vật";
             const memLabel = i18n ? i18n.t(lang, "memCount") : "ký ức";
             const delTitle = i18n ? i18n.t(lang, "deleteScenario") : "Xóa kịch bản";
@@ -941,7 +1178,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     <i class="fa-regular fa-message"></i>
                     <div>
                         <span class="history-item-title">${escapeHtml(session.title)}</span>
-                        <span class="history-item-time">${relativeTime(session.createdAt)}</span>
+                        <span class="history-item-time">${relativeTime(session.createdAt, config.language || "vi")}</span>
                     </div>
                 </div>
                 <i class="fa-solid fa-xmark history-delete-btn" title="${delTitle}"></i>
@@ -1026,10 +1263,10 @@ document.addEventListener("DOMContentLoaded", () => {
         session.messages = session.messages.slice(0, msgIndex);
         saveSessions();
 
-        if (currentSessionId !== sessionId) {
-            currentSessionId = sessionId;
-            renderCurrentSession();
-        }
+        // Always re-render the truncated thread first, otherwise the stale DOM
+        // rows stay while handleSendMessage appends the edited message → duplicate.
+        if (currentSessionId !== sessionId) currentSessionId = sessionId;
+        renderCurrentSession();
 
         handleSendMessage({
             text: newText.trim(),
@@ -1039,7 +1276,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    function handleRegenerateFromIndex(msgIndex) {
+    function handleRegenerateFromIndex(msgIndex, opts = {}) {
         const session = getActiveSession();
         if (!session || !session.messages || msgIndex >= session.messages.length) return;
         let userIndex = -1;
@@ -1051,6 +1288,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (userIndex === -1) return;
         const userMsg = session.messages[userIndex];
+        // Keep the previous answer(s) so the new one becomes another comparable variant.
+        const prev = session.messages[msgIndex];
+        let priorVariants = [];
+        if (prev && prev.role === "assistant") {
+            priorVariants = Array.isArray(prev.variants) && prev.variants.length
+                ? prev.variants.slice()
+                : [prev.content];
+        }
         session.messages = session.messages.slice(0, userIndex + 1);
         saveSessions();
         renderCurrentSession();
@@ -1060,6 +1305,8 @@ document.addEventListener("DOMContentLoaded", () => {
             fullContent: userMsg.content,
             attachments: userMsg.attachments,
             sessionId: session.id,
+            temperatureOverride: opts.temperatureOverride,
+            priorVariants,
         });
     }
 
@@ -1126,25 +1373,118 @@ document.addEventListener("DOMContentLoaded", () => {
         } else {
             welcomeScreen.style.display = "none";
             session.messages.forEach((msg, idx) => {
+                if (msg.summary) {
+                    messagesContainer.appendChild(createSummaryElement(msg));
+                    return;
+                }
                 const isMsgStreaming = (idx === session.messages.length - 1 && isThisSessionGenerating);
                 const msgEl = createMessageElement(msg.role, msg.content, msg.reasoning, msg.searchResults, msg.toolEvents, msg.attachments, msg.text, idx, isMsgStreaming);
+                if (msg.pinned) msgEl.classList.add("pinned");
+                if (msg.role === "assistant" && Array.isArray(msg.variants) && msg.variants.length > 1) {
+                    const stackEl = msgEl.querySelector(".message-stack");
+                    if (stackEl) stackEl.appendChild(buildVariantSwitcher(msg));
+                }
                 messagesContainer.appendChild(msgEl);
             });
             scrollToBottom();
         }
+        updateContextMeter();
+    }
+
+    function makePinButton(msgIndex) {
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const session = getActiveSession();
+        const pinned = !!(session && session.messages[msgIndex] && session.messages[msgIndex].pinned);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "msg-action-btn pin-msg-btn" + (pinned ? " active" : "");
+        btn.title = (i18n && i18n.t(lang, pinned ? "unpin" : "pin")) || (pinned ? "Bỏ ghim" : "Ghim");
+        btn.innerHTML = '<i class="fa-solid fa-thumbtack"></i>';
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const s = getActiveSession();
+            const m = s && s.messages[msgIndex];
+            if (!m) return;
+            m.pinned = !m.pinned;
+            saveSessions();
+            renderCurrentSession();
+        });
+        return btn;
+    }
+
+    function openRegenMenu(anchor, msgIndex) {
+        document.querySelectorAll(".regen-menu").forEach((m) => m.remove());
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const base = config.temperature;
+        const choices = [
+            { label: (i18n && i18n.t(lang, "regenSame")) || "Tạo lại", t: undefined },
+            { label: (i18n && i18n.t(lang, "regenCreative")) || "Sáng tạo hơn", t: Math.min(1.5, base + 0.3) },
+            { label: (i18n && i18n.t(lang, "regenPrecise")) || "Chính xác hơn", t: Math.max(0, base - 0.3) },
+        ];
+        const menu = document.createElement("div");
+        menu.className = "regen-menu";
+        menu.innerHTML = choices.map((c, i) => `<button type="button" data-i="${i}">${escapeHtml(c.label)}</button>`).join("");
+        menu.querySelectorAll("button").forEach((b) => {
+            b.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const i = parseInt(b.getAttribute("data-i"), 10);
+                menu.remove();
+                handleRegenerateFromIndex(msgIndex, { temperatureOverride: choices[i].t });
+            });
+        });
+        // Anchor to the viewport so the hover-only .msg-actions opacity can't hide it.
+        document.body.appendChild(menu);
+        const r = anchor.getBoundingClientRect();
+        const mw = menu.offsetWidth || 160;
+        const left = Math.min(r.left, window.innerWidth - mw - 8);
+        menu.style.top = Math.round(r.bottom + 4) + "px";
+        menu.style.left = Math.round(Math.max(8, left)) + "px";
+        setTimeout(() => {
+            document.addEventListener("click", function h() {
+                menu.remove();
+                document.removeEventListener("click", h);
+            });
+        }, 0);
+    }
+
+    function buildVariantSwitcher(msg) {
+        const n = msg.variants.length;
+        let cur = typeof msg.activeVariant === "number" ? msg.activeVariant : n - 1;
+        const wrap = document.createElement("div");
+        wrap.className = "variant-switcher";
+        wrap.innerHTML = `<button type="button" class="var-prev" title="prev">‹</button><span class="var-count">${cur + 1}/${n}</span><button type="button" class="var-next" title="next">›</button>`;
+        const go = (dir) => {
+            cur = (cur + dir + n) % n;
+            msg.activeVariant = cur;
+            msg.content = msg.variants[cur];
+            saveSessions();
+            renderCurrentSession();
+        };
+        wrap.querySelector(".var-prev").addEventListener("click", () => go(-1));
+        wrap.querySelector(".var-next").addEventListener("click", () => go(1));
+        return wrap;
+    }
+
+    function createSummaryElement(msg) {
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const title = (i18n && i18n.t(lang, "compressedTitle")) || "Đã nén hội thoại cũ";
+        const row = document.createElement("div");
+        row.className = "summary-row";
+        const body = String(msg.content || "").replace(/^\[[^\]]*\]\n?/, "");
+        row.innerHTML = `
+            <details class="summary-card">
+                <summary><i class="fa-solid fa-compress"></i> ${escapeHtml(title)} (${msg.count || ""})</summary>
+                <div class="summary-content">${renderMarkdown(body)}</div>
+            </details>`;
+        return row;
     }
 
     // --------------------------------------------------------------------------
     // File & PDF Attachment Logic
     // --------------------------------------------------------------------------
-    function formatFileSize(bytes) {
-        if (!bytes || bytes === 0) return "0 B";
-        const k = 1024;
-        const sizes = ["B", "KB", "MB", "GB"];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-    }
-
     function renderAttachmentChips() {
         if (!attachmentPreviewBar) return;
         if (!attachedFiles || attachedFiles.length === 0) {
@@ -1333,7 +1673,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function handleSendMessage(opts) {
         const regen = !!(opts && opts.regenerate);
-        let rawText = regen ? String(opts.text || "").trim() : userInput.value.trim();
+        // Edits and regenerations carry their text in opts.text; only a fresh
+        // send reads the composer. (Previously non-regen always read the
+        // composer, so editing a message picked up stale/empty composer text.)
+        let rawText = (opts && typeof opts.text === "string")
+            ? opts.text.trim()
+            : userInput.value.trim();
         if (!rawText && (!attachedFiles || attachedFiles.length === 0) && !(opts && opts.fullContent)) return;
 
         const targetSession = (opts && opts.sessionId) ? (sessions.find(s => s.id === opts.sessionId) || getActiveSession()) : getActiveSession();
@@ -1381,7 +1726,10 @@ document.addEventListener("DOMContentLoaded", () => {
             welcomeScreen.style.display = "none";
         }
 
-        if (!regen && currentSessionId === targetSessionId) {
+        // Clear the composer only for a fresh send — never for edits/regens,
+        // which carry their own text and shouldn't wipe the user's draft.
+        const fromComposer = !regen && !(opts && typeof opts.text === "string");
+        if (fromComposer && currentSessionId === targetSessionId) {
             userInput.value = "";
             userInput.style.height = "auto";
         }
@@ -1405,6 +1753,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 appendMessageUI("user", fullPromptContent, "", null, null, attachmentsMeta, cleanPrompt, targetSession.messages.length - 1);
             }
         }
+
+        // Auto-compress older turns when the window is nearly full (persisted once).
+        await maybeAutoCompress(targetSession);
 
         // --- Web Search Phase (only when agent tools are off) ---
         let searchResults = [];
@@ -1453,8 +1804,10 @@ document.addEventListener("DOMContentLoaded", () => {
             targetSession: targetSession,
         });
 
+        let streamingBubble = null;
         if (currentSessionId === targetSessionId) {
-            appendMessageUI("assistant", "", "", searchResults, null, null, null, targetSession.messages.length - 1, true);
+            const streamingRow = appendMessageUI("assistant", "", "", searchResults, null, null, null, targetSession.messages.length - 1, true);
+            streamingBubble = streamingRow ? streamingRow.querySelector(".bubble") : null;
         }
 
         // Update sidebar generating badge
@@ -1482,10 +1835,13 @@ document.addEventListener("DOMContentLoaded", () => {
             ? messageContext
             : [{ role: "system", content: config.systemPrompt }, ...messageContext];
 
+        const temperature = (opts && typeof opts.temperatureOverride === "number")
+            ? opts.temperatureOverride
+            : config.temperature;
         const payload = {
-            model: "qwen35b-uncensored",
+            model: currentModel,
             messages: messagesPayload,
-            temperature: config.temperature,
+            temperature: temperature,
             top_p: config.topP,
             repeat_penalty: config.repeatPenalty,
             max_tokens: config.maxTokens > 0 ? config.maxTokens : undefined,
@@ -1500,6 +1856,67 @@ document.addEventListener("DOMContentLoaded", () => {
         let fullReasoning = "";
         let fullAssistantContent = "";
         let toolEvents = [];
+
+        // --- Throttled live rendering ---------------------------------------
+        // Re-parsing the whole accumulated answer on every SSE token is O(n²)
+        // and re-highlighting each code block per token made long replies lag.
+        // We coalesce updates into one paint per animation frame, do only a
+        // lightweight markdown pass while streaming, and leave the full
+        // enhancement (code cards + hljs) to renderCurrentSession() in finally.
+        let pendingRender = false;
+        let streamDone = false;
+
+        function getLiveBubble() {
+            // Cached ref is fastest; re-acquire if a re-render detached it
+            // (e.g. the user switched away and back mid-stream).
+            if (streamingBubble && streamingBubble.isConnected) return streamingBubble;
+            const row = messagesContainer.querySelector(".message-row.assistant:last-child");
+            streamingBubble = row ? row.querySelector(".bubble") : null;
+            return streamingBubble;
+        }
+
+        function buildLiveHTML() {
+            let htmlOutput = "";
+            if (searchResults.length > 0) {
+                htmlOutput += buildSearchResultsHTML(searchResults);
+            }
+            if (toolEvents.length > 0) {
+                htmlOutput += buildToolEventsHTML(toolEvents, false);
+            }
+            if (config.showReasoning && fullReasoning) {
+                const i18n = window.BobigoI18n;
+                const lang = config.language || "vi";
+                const thinkTitle = (i18n && i18n.t(lang, "thinkingProgress")) || "Tiến trình suy luận";
+                htmlOutput += `<details class="thinking-box" open>
+                    <summary><i class="fa-solid fa-brain"></i> ${escapeHtml(thinkTitle)}</summary>
+                    <div class="thinking-content">${renderMarkdown(fullReasoning)}</div>
+                </details>`;
+            }
+            if (fullAssistantContent) {
+                htmlOutput += `<div class="response-content">${renderMarkdown(fullAssistantContent)}</div>`;
+            } else if (!fullReasoning && toolEvents.length === 0) {
+                const i18n = window.BobigoI18n;
+                const lang = config.language || "vi";
+                const thinkPh = (i18n && i18n.t(lang, "thinkingPlaceholder")) || "Đang suy nghĩ…";
+                htmlOutput += `<span class="cursor-typing">${escapeHtml(thinkPh)}</span>`;
+            }
+            return htmlOutput;
+        }
+
+        function scheduleLiveRender() {
+            if (currentSessionId !== targetSessionId || pendingRender) return;
+            pendingRender = true;
+            requestAnimationFrame(() => {
+                pendingRender = false;
+                // Once the stream is done, renderCurrentSession() owns the final
+                // (fully enhanced) DOM — don't clobber it with a light pass.
+                if (streamDone || currentSessionId !== targetSessionId) return;
+                const liveBubble = getLiveBubble();
+                if (!liveBubble) return;
+                liveBubble.innerHTML = buildLiveHTML();
+                scrollToBottom();
+            });
+        }
 
         try {
             const response = await fetch(API_URL, {
@@ -1547,43 +1964,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             assistantMsgObj.reasoning = fullReasoning;
                             assistantMsgObj.toolEvents = toolEvents;
 
-                            if (currentSessionId === targetSessionId) {
-                                let htmlOutput = "";
-                                if (searchResults.length > 0) {
-                                    htmlOutput += buildSearchResultsHTML(searchResults);
-                                }
-                                if (toolEvents.length > 0) {
-                                    htmlOutput += buildToolEventsHTML(toolEvents, false);
-                                }
-                                if (config.showReasoning && fullReasoning) {
-                                    const i18n = window.BobigoI18n;
-                                    const lang = config.language || "vi";
-                                    const thinkTitle = (i18n && i18n.t(lang, "thinkingProgress")) || "Tiến trình suy luận";
-                                    htmlOutput += `<details class="thinking-box" open>
-                                        <summary><i class="fa-solid fa-brain"></i> ${escapeHtml(thinkTitle)}</summary>
-                                        <div class="thinking-content">${renderMarkdown(fullReasoning)}</div>
-                                    </details>`;
-                                }
-
-                                if (fullAssistantContent) {
-                                    htmlOutput += `<div class="response-content">${renderMarkdown(fullAssistantContent)}</div>`;
-                                } else if (!fullReasoning && toolEvents.length === 0) {
-                                    const i18n = window.BobigoI18n;
-                                    const lang = config.language || "vi";
-                                    const thinkPh = (i18n && i18n.t(lang, "thinkingPlaceholder")) || "Đang suy nghĩ…";
-                                    htmlOutput += `<span class="cursor-typing">${escapeHtml(thinkPh)}</span>`;
-                                }
-
-                                const lastAssistantRow = messagesContainer.querySelector(".message-row.assistant:last-child");
-                                if (lastAssistantRow) {
-                                    const liveBubble = lastAssistantRow.querySelector(".bubble");
-                                    if (liveBubble) {
-                                        liveBubble.innerHTML = htmlOutput;
-                                        enhanceMarkdownElements(liveBubble);
-                                        scrollToBottom();
-                                    }
-                                }
-                            }
+                            scheduleLiveRender();
 
                         } catch (err) {
                             console.error("JSON parse error", err);
@@ -1604,6 +1985,12 @@ document.addEventListener("DOMContentLoaded", () => {
             assistantMsgObj.reasoning = fullReasoning;
             assistantMsgObj.toolEvents = toolEvents;
 
+            // Regeneration: keep prior answers as switchable variants for comparison.
+            if (opts && Array.isArray(opts.priorVariants) && opts.priorVariants.length) {
+                assistantMsgObj.variants = [...opts.priorVariants, fullAssistantContent];
+                assistantMsgObj.activeVariant = assistantMsgObj.variants.length - 1;
+            }
+
         } catch (error) {
             const i18n = window.BobigoI18n;
             const lang = config.language || "vi";
@@ -1618,6 +2005,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 assistantMsgObj.content = `[${errTitle}: ${error.message || String(error)}]`;
             }
         } finally {
+            streamDone = true;
             delete assistantMsgObj.isStreaming;
             activeGenerations.delete(targetSessionId);
             saveSessions();
@@ -1668,6 +2056,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const msgEl = createMessageElement(role, content, reasoning, searchResults, toolEvents, attachments, userText, msgIndex, isStreaming);
         messagesContainer.appendChild(msgEl);
         scrollToBottom();
+        return msgEl;
     }
 
     function createMessageElement(role, content, reasoning = "", searchResults = null, toolEvents = null, attachments = null, userText = null, msgIndex = null, isStreaming = false) {
@@ -1793,6 +2182,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             });
             actions.appendChild(copyBtn);
+            if (msgIndex !== null) actions.appendChild(makePinButton(msgIndex));
             stack.appendChild(actions);
 
         } else if (role === "assistant" && content) {
@@ -1813,7 +2203,10 @@ document.addEventListener("DOMContentLoaded", () => {
             regenBtn.className = "msg-action-btn regen-btn";
             regenBtn.title = i18n ? i18n.t(lang, "regen") : "Tạo lại";
             regenBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i>';
-            regenBtn.addEventListener("click", () => handleRegenerateFromIndex(msgIndex));
+            regenBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                openRegenMenu(regenBtn, msgIndex);
+            });
             actions.appendChild(regenBtn);
 
             // Copy Button
@@ -1832,6 +2225,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             });
             actions.appendChild(copyBtn);
+            if (msgIndex !== null) actions.appendChild(makePinButton(msgIndex));
             stack.appendChild(actions);
         }
 
@@ -1840,31 +2234,8 @@ document.addEventListener("DOMContentLoaded", () => {
         return row;
     }
 
-    function relativeTime(iso) {
-        if (!iso) return "";
-        const then = new Date(iso).getTime();
-        if (Number.isNaN(then)) return "";
-        const delta = Math.max(0, Date.now() - then);
-        const min = Math.floor(delta / 60000);
-        const i18n = window.BobigoI18n;
-        const lang = (config && config.language) || "vi";
-        if (min < 1) return i18n ? i18n.t(lang, "justNow") : "Vừa xong";
-        if (min < 60) return `${min}${i18n ? i18n.t(lang, "minAgo") : " phút trước"}`;
-        const hr = Math.floor(min / 60);
-        if (hr < 24) return `${hr}${i18n ? i18n.t(lang, "hrAgo") : " giờ trước"}`;
-        const day = Math.floor(hr / 24);
-        if (day < 7) return `${day}${i18n ? i18n.t(lang, "dayAgo") : " ngày trước"}`;
-        return new Date(iso).toLocaleDateString("vi-VN");
-    }
-
     function scrollToBottom() {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }
-
-    function escapeHtml(str) {
-        return str.replace(/[&<>"']/g, function(m) {
-            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
-        });
     }
 
     // --------------------------------------------------------------------------
@@ -1967,52 +2338,11 @@ document.addEventListener("DOMContentLoaded", () => {
         reader.readAsText(file);
     });
 
-    function downloadFile(content, fileName, contentType) {
-        const a = document.createElement("a");
-        const file = new Blob([content], { type: contentType });
-        a.href = URL.createObjectURL(file);
-        a.download = fileName;
-        a.click();
-        URL.revokeObjectURL(a.href);
-    }
-
     // --------------------------------------------------------------------------
     // Config Panel Logic
     // --------------------------------------------------------------------------
-    function loadConfig() {
-        const defaults = {
-            temperature: 0.7,
-            topP: 0.9,
-            repeatPenalty: 1.1,
-            maxTokens: 4096,
-            systemPrompt: (window.BobigoI18n && BobigoI18n.SYSTEM.vi) || "Bạn là Bobigo, trợ lý AI.",
-            memory: true,
-            showReasoning: true,
-            webSearch: false,
-            agentTools: true,
-            language: "vi",
-        };
-
-        try {
-            const saved = JSON.parse(localStorage.getItem("bobigo_config"));
-            const merged = { ...defaults, ...saved };
-            if (typeof merged.systemPrompt === "string") {
-                const oldHw = /Apple M4|Metal GPU|llama-server|Apple Silicon/i.test(merged.systemPrompt);
-                const genericBobigo = /Bạn là Bobigo|You are Bobigo/.test(merged.systemPrompt);
-                if (oldHw || (genericBobigo && !merged.systemPrompt.includes("list_files"))) {
-                    const lang = merged.language === "en" ? "en" : "vi";
-                    merged.systemPrompt = (window.BobigoI18n && BobigoI18n.SYSTEM[lang]) || defaults.systemPrompt;
-                }
-            }
-            if (merged.language !== "en") merged.language = "vi";
-            return merged;
-        } catch (e) {
-            return defaults;
-        }
-    }
-
     function saveConfig() {
-        localStorage.setItem("bobigo_config", JSON.stringify(config));
+        persistConfig(config);
     }
 
     function initConfigUI() {
