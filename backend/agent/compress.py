@@ -1,9 +1,8 @@
 """Summarize older chat turns into a compact memory when context overflows.
 
-The summary is produced once (via a non-streaming LLM call, same shape as
-``backend.expand.expand_world``) and the frontend persists it in place of the
-old turns, so it is not recomputed every request. ``trim_messages`` remains the
-final safety net for hard overflow.
+The summary is produced once (via a non-streaming LLM call) and the frontend
+persists it in place of the old turns, so it is not recomputed every request.
+``trim_messages`` remains the final safety net for hard overflow.
 """
 
 from __future__ import annotations

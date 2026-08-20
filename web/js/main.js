@@ -23,7 +23,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Layout Navigation & Panels
     const navRailBtns = document.querySelectorAll(".rail-btn");
     const railChatBtn = document.getElementById("rail-chat-btn");
-    const railRpBtn = document.getElementById("rail-rp-btn");
+    const railCompanionsBtn = document.getElementById("rail-companions-btn");
+    const railProjectsBtn = document.getElementById("rail-projects-btn");
     const railConfigBtn = document.getElementById("rail-config-btn");
     const openSettingsBtn = document.getElementById("open-settings-btn");
     
@@ -35,7 +36,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const sidebarOverlay = document.getElementById("sidebar-overlay");
 
     // History Panel Elements
-    const newChatBtn = document.getElementById("new-chat-btn");
     const historyList = document.getElementById("history-list");
     const historySearchInput = document.getElementById("history-search-input");
     const clearAllHistoryBtn = document.getElementById("clear-all-history-btn");
@@ -110,10 +110,13 @@ document.addEventListener("DOMContentLoaded", () => {
     };
     const THEME_CLASSES = ["dark", "light", "theme-indigo", "theme-evergreen", "theme-amethyst", "theme-porcelain"];
     let currentTheme = "obsidian";
-    let appMode = "chat";
-    let worlds = (window.BobigoRP && BobigoRP.loadWorlds()) || [];
-    let currentWorldId = null;
-    let rpTab = "worlds";
+    const STYLE_CLASSES = ["style-pixel"]; // declared early — initStyle() runs before the style block
+    let currentStyle = "modern";
+    let appMode = "chat"; // "chat" | "companion" | "project"
+    let companions = (window.BobigoCompanions && BobigoCompanions.loadCompanions()) || [];
+    let currentCompanionId = null;
+    let projects = (window.BobigoProjects && BobigoProjects.loadProjects()) || [];
+    let currentProjectId = null; // which project is opened (null = project list)
     const welcomeDefaultHTML = welcomeScreen ? welcomeScreen.innerHTML : "";
 
     // Configure Marked.js
@@ -226,9 +229,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Initialize App
     initTheme();
+    initStyle();
     initConfigUI();
     initSessions();
-    initWorlds();
+    initCompanions();
+    initProjects();
     syncWebSearchUI();
     applyLanguage(config.language || "vi");
     checkHealth();
@@ -246,7 +251,19 @@ document.addEventListener("DOMContentLoaded", () => {
     updateContextMeter();
 
     function currentSystemPrompt() {
-        return appMode === "roleplay" ? "" : (config.systemPrompt || "");
+        if (appMode === "companion") {
+            const c = getActiveSession();
+            return (c && window.BobigoCompanions)
+                ? BobigoCompanions.buildSystemPrompt(c, { contextWindow: contextInfo.window, reserve: contextInfo.reserve })
+                : "";
+        }
+        let sp = config.systemPrompt || "";
+        const s = getActiveSession();
+        if (s && s.projectId && window.BobigoProjects) {
+            const proj = projects.find((p) => p.id === s.projectId);
+            if (proj) sp = (sp + "\n\n" + BobigoProjects.buildContext(proj, { contextWindow: contextInfo.window, reserve: contextInfo.reserve, language: config.language })).trim();
+        }
+        return sp;
     }
 
     function updateContextMeter() {
@@ -417,6 +434,9 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".theme-swatch").forEach((sw) => {
         sw.addEventListener("click", () => setTheme(sw.getAttribute("data-theme")));
     });
+    document.querySelectorAll(".style-swatch").forEach((sw) => {
+        sw.addEventListener("click", () => setStyle(sw.getAttribute("data-style")));
+    });
 
     // Close settings when clicking the dimmed backdrop.
     if (configPanel) {
@@ -509,7 +529,22 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Quick sun/moon toggle flips between the light and dark signature themes (if present).
+    // --- Visual style (shape/typography skin, independent of theme) ---------
+    function initStyle() {
+        const saved = localStorage.getItem("bobigo_style") || "modern";
+        setStyle(saved);
+    }
+    function setStyle(name) {
+        currentStyle = (name === "pixel") ? "pixel" : "modern";
+        body.classList.remove(...STYLE_CLASSES);
+        if (currentStyle === "pixel") body.classList.add("style-pixel");
+        localStorage.setItem("bobigo_style", currentStyle);
+        document.querySelectorAll(".style-swatch").forEach((s) => {
+            s.classList.toggle("active", s.getAttribute("data-style") === currentStyle);
+        });
+    }
+
+    // Optional quick sun/moon toggle (theme selection now lives in Settings).
     if (themeToggle) {
         themeToggle.addEventListener("click", () => {
             const isLight = (THEMES[currentTheme] || THEMES.obsidian).family === "light";
@@ -526,8 +561,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function syncSidebarOverlay() {
         if (!sidebarOverlay) return;
-        const isAnyOpen = (!historyPanel.classList.contains("closed") || document.body.classList.contains("sidebar-open"));
-        if (isMobile() && isAnyOpen) {
+        const open = document.body.classList.contains("sidebar-open");
+        if (isMobile() && open) {
             sidebarOverlay.classList.remove("hidden");
             sidebarOverlay.classList.add("active");
         } else {
@@ -536,35 +571,34 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    // Desktop: panel is a persistent column, collapsible via sidebar-collapsed.
+    // Mobile: off-canvas drawer via sidebar-open.
+    function setSidebarCollapsed(on) {
+        document.body.classList.toggle("sidebar-collapsed", !!on);
+        localStorage.setItem("bobigo_sidebar_collapsed", on ? "1" : "0");
+    }
+
     function openHistoryDrawer() {
-        historyPanel.classList.remove("closed");
-        configPanel.classList.add("closed");
         document.body.classList.add("sidebar-open");
-        document.body.classList.remove("config-open");
+        if (!isMobile()) setSidebarCollapsed(false); // clicking a rail tab re-opens it
         syncSidebarOverlay();
     }
 
     function closeHistoryDrawer() {
-        historyPanel.classList.add("closed");
         document.body.classList.remove("sidebar-open");
         syncSidebarOverlay();
     }
 
     function toggleHistoryDrawer() {
-        // Use the panel's own state as the single source of truth so the first
-        // click always matches what the user sees (avoids the double-click desync
-        // when body.sidebar-open and .closed disagreed on desktop).
-        if (historyPanel.classList.contains("closed")) {
-            openHistoryDrawer();
-        } else {
-            closeHistoryDrawer();
-        }
+        if (document.body.classList.contains("sidebar-open")) closeHistoryDrawer();
+        else openHistoryDrawer();
     }
 
     // Settings is now a centered modal (its own backdrop), not a slide-out.
     function openConfigDrawer() {
         configPanel.classList.remove("hidden");
         document.body.classList.add("config-open");
+        updateHealthSpeedDisplay();
         if (typeof refreshSettingsCatalog === "function") refreshSettingsCatalog();
     }
 
@@ -582,7 +616,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function closeAllDrawers() {
-        historyPanel.classList.add("closed");
         configPanel.classList.add("hidden");
         document.body.classList.remove("sidebar-open", "config-open");
         if (sidebarOverlay) {
@@ -591,16 +624,30 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Auto-close drawers on mobile on page load
-    if (isMobile()) {
-        closeAllDrawers();
-    }
+    // Desktop shows the panel by default; phones start collapsed.
+    if (isMobile()) closeAllDrawers();
+    else document.body.classList.add("sidebar-open");
 
     if (sidebarOverlay) {
-        sidebarOverlay.addEventListener("click", () => {
-            closeAllDrawers();
-        });
+        sidebarOverlay.addEventListener("click", () => closeHistoryDrawer());
     }
+
+    // Click-away closes/hides the history panel when clicking outside nav rail or history panel.
+    document.addEventListener("click", (e) => {
+        if (e.target.closest(".history-panel") || e.target.closest(".nav-rail")
+            || e.target.closest(".chat-menu") || e.target.closest(".modal-backdrop")
+            || e.target.closest("#mobile-toggle")) return;
+
+        if (isMobile()) {
+            if (document.body.classList.contains("sidebar-open")) {
+                closeHistoryDrawer();
+            }
+        } else {
+            if (!document.body.classList.contains("sidebar-collapsed")) {
+                setSidebarCollapsed(true);
+            }
+        }
+    });
 
     railChatBtn.addEventListener("click", () => {
         setMode("chat");
@@ -608,10 +655,19 @@ document.addEventListener("DOMContentLoaded", () => {
         openHistoryDrawer();
     });
 
-    if (railRpBtn) {
-        railRpBtn.addEventListener("click", () => {
-            setMode("roleplay");
-            setNavActive(railRpBtn);
+    if (railCompanionsBtn) {
+        railCompanionsBtn.addEventListener("click", () => {
+            setMode("companion");
+            setNavActive(railCompanionsBtn);
+            openHistoryDrawer();
+        });
+    }
+
+    if (railProjectsBtn) {
+        railProjectsBtn.addEventListener("click", () => {
+            currentProjectId = null; // start at the project list
+            setMode("project");
+            setNavActive(railProjectsBtn);
             openHistoryDrawer();
         });
     }
@@ -623,16 +679,14 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    if (openSettingsBtn) {
-        openSettingsBtn.addEventListener("click", () => {
-            if (railConfigBtn) setNavActive(railConfigBtn);
-            openConfigDrawer();
-        });
-    }
+    openSettingsBtn.addEventListener("click", () => {
+        setNavActive(openSettingsBtn);
+        openConfigDrawer();
+    });
 
     closeConfigBtn.addEventListener("click", () => {
         closeConfigDrawer();
-        setNavActive(appMode === "roleplay" ? railRpBtn : railChatBtn);
+        setNavActive(railChatBtn);
     });
 
     topbarConfigBtn.addEventListener("click", () => {
@@ -641,9 +695,39 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (mobileToggle) {
         mobileToggle.addEventListener("click", () => {
-            toggleHistoryDrawer();
+            if (isMobile()) toggleHistoryDrawer();
+            else setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
         });
     }
+
+    // Panel-header chevron: desktop collapses the column, mobile closes the drawer.
+    document.getElementById("sidebar-compact-btn")?.addEventListener("click", () => {
+        if (isMobile()) closeHistoryDrawer();
+        else setSidebarCollapsed(true);
+    });
+    if (!isMobile() && localStorage.getItem("bobigo_sidebar_collapsed") === "1") {
+        setSidebarCollapsed(true);
+    }
+
+    // Topbar conversation title → dropdown of actions (Claude-style).
+    document.getElementById("convo-title-btn")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const s = getActiveSession();
+        if (!s) return;
+        if (appMode === "companion") { openCompanionEditor(s.id); return; }
+        openChatMenu(e.currentTarget, s, "");
+    });
+
+    // F2 renames the active chat (matching the item action shortcut).
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "F2" && appMode === "chat" && currentSessionId
+            && !/^(INPUT|TEXTAREA)$/.test((e.target.tagName || ""))) {
+            if (historyList.querySelector(`.history-item[data-id="${currentSessionId}"]`)) {
+                e.preventDefault();
+                startRenameSession(currentSessionId);
+            }
+        }
+    });
 
     window.addEventListener("resize", () => {
         if (!isMobile()) {
@@ -719,11 +803,26 @@ document.addEventListener("DOMContentLoaded", () => {
         if (data && Number.isFinite(data.context_window)) contextInfo.window = data.context_window;
         if (data && Number.isFinite(data.reply_reserve)) contextInfo.reserve = data.reply_reserve;
         updateContextMeter();
-        if (healthCardLine) {
-            const model = (data && data.model) || "—";
-            const jinja = data && data.jinja_known ? (data.jinja ? "jinja ✓" : "jinja ✗") : "jinja ?";
-            healthCardLine.textContent = `${data && data.llm_ready ? "Online" : "Offline"} · ${model} · ${jinja}`;
+        const online = !!(data && data.llm_ready);
+        const healthCard = document.getElementById("health-card");
+        if (healthCard) {
+            healthCard.classList.toggle("ready", online);
+            healthCard.classList.toggle("loading", !online);
         }
+        const hDot = document.getElementById("health-dot");
+        const hStatus = document.getElementById("health-status");
+        const hModel = document.getElementById("health-model");
+        const hSpeed = document.getElementById("health-speed");
+        const hLatency = document.getElementById("health-latency");
+        const hJinja = document.getElementById("health-jinja");
+        const hCtx = document.getElementById("health-ctx");
+        if (hDot) hDot.className = "health-dot " + (online ? (jinjaBad ? "warn" : "online") : "loading");
+        if (hStatus) hStatus.textContent = online ? (i18n ? i18n.t(lang, "ready") : "Sẵn sàng") : (i18n ? i18n.t(lang, "loadingModel") : "Đang tải mô hình");
+        if (hModel) { const m = (data && data.model) || "—"; hModel.textContent = m.length > 30 ? "…" + m.slice(-30) : m; hModel.title = m; }
+        if (hLatency) hLatency.textContent = (data && Number.isFinite(data.latency)) ? `${data.latency} ms` : "—";
+        if (hJinja) hJinja.textContent = data && data.jinja_known ? (data.jinja ? "✓" : "✗") : "?";
+        if (hCtx) hCtx.textContent = (data && data.context_window) ? data.context_window.toLocaleString() : "—";
+        updateHealthSpeedDisplay();
         if (!isGenerating) {
             sendBtn.disabled = userInput.value.trim() === "" || !llmReady;
         }
@@ -732,13 +831,28 @@ document.addEventListener("DOMContentLoaded", () => {
             : (lang === "en" ? "Waiting for model to be ready…" : "Đợi mô hình sẵn sàng…");
     }
 
+    function updateHealthSpeedDisplay(tps) {
+        const hSpeed = document.getElementById("health-speed");
+        if (!hSpeed) return;
+        const val = tps || localStorage.getItem("bobigo_last_tps");
+        if (val && parseFloat(val) > 0) {
+            hSpeed.textContent = `${val} tokens/s`;
+            hSpeed.title = `${val} tokens/s`;
+        } else {
+            hSpeed.textContent = "—";
+        }
+    }
+
     async function checkHealth() {
         const lang = config.language || "vi";
+        const t0 = performance.now();
         try {
             const res = await fetch(HEALTH_URL, { cache: "no-store" });
+            const latency = Math.round(performance.now() - t0);
             if (res.ok) {
                 const data = await res.json();
                 if (data && typeof data.llm_ready === "boolean") {
+                    data.latency = latency;
                     applyHealth(data);
                     return;
                 }
@@ -748,7 +862,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         try {
+            const t1 = performance.now();
             const res = await fetch("/v1/models", { cache: "no-store" });
+            const latency = Math.round(performance.now() - t1);
             if (res.ok) {
                 const data = await res.json();
                 const model = (data.data && data.data[0] && data.data[0].id)
@@ -759,6 +875,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     jinja: null,
                     jinja_known: false,
                     model,
+                    latency,
                     message: lang === "en" ? "Ready" : "Sẵn sàng",
                 });
                 return;
@@ -771,6 +888,7 @@ document.addEventListener("DOMContentLoaded", () => {
             llm_ready: false,
             jinja: null,
             jinja_known: false,
+            model: null,
             message: lang === "en" ? "Model not ready. Please wait for llama-server or run ./run.sh." : "Mô hình chưa sẵn sàng. Đợi llama-server hoặc chạy lại ./run.sh (dùng .venv).",
         });
     }
@@ -839,8 +957,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function saveSessions() {
-        if (appMode === "roleplay") {
-            if (window.BobigoRP) BobigoRP.saveWorlds(worlds);
+        if (appMode === "companion") {
+            if (window.BobigoCompanions) BobigoCompanions.saveCompanions(companions);
             return;
         }
         localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
@@ -857,9 +975,11 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function createNewSession(switchImmediately = true) {
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
         const newSession = {
             id: "session_" + Date.now(),
-            title: "Cuộc trò chuyện mới",
+            title: i18n ? i18n.t(lang, "newChat") : (lang === "en" ? "New chat" : "Cuộc trò chuyện mới"),
             createdAt: new Date().toISOString(),
             messages: []
         };
@@ -874,50 +994,69 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function getActiveSession() {
-        if (appMode === "roleplay") {
-            return worlds.find((w) => w.id === currentWorldId) || worlds[0];
+        if (appMode === "companion") {
+            return companions.find((c) => c.id === currentCompanionId) || companions[0] || null;
         }
-        return sessions.find(s => s.id === currentSessionId) || sessions[0];
+        const found = sessions.find(s => s.id === currentSessionId);
+        if (appMode === "project") return found || null; // no cross-project fallback
+        return found || sessions[0];
     }
 
-    function initWorlds() {
-        if (!window.BobigoRP) return;
-        if (worlds.length === 0) {
-            worlds = [BobigoRP.newWorld()];
-            BobigoRP.saveWorlds(worlds);
+    function initCompanions() {
+        if (!window.BobigoCompanions) return;
+        companions = BobigoCompanions.loadCompanions();
+        if (!companions.length && !localStorage.getItem("bobigo_companions_seeded")) {
+            companions = BobigoCompanions.defaultCompanions(config.language);
+            BobigoCompanions.saveCompanions(companions);
+            localStorage.setItem("bobigo_companions_seeded", "1");
         }
-        currentWorldId = worlds[0].id;
+        currentCompanionId = companions.length ? companions[0].id : null;
+    }
+
+    function createCompanion() {
+        if (!window.BobigoCompanions) return null;
+        const c = BobigoCompanions.newCompanion({ language: config.language });
+        companions.unshift(c);
+        currentCompanionId = c.id;
+        saveSessions();
+        return c;
+    }
+
+    function initProjects() {
+        if (!window.BobigoProjects) return;
+        projects = BobigoProjects.loadProjects();
+    }
+    function getCurrentProject() {
+        return projects.find((p) => p.id === currentProjectId) || null;
     }
 
     function setMode(mode) {
         appMode = mode;
-        document.body.classList.toggle("mode-rp", mode === "roleplay");
-        const tabs = document.getElementById("rp-tabs");
-        const sceneBar = document.getElementById("rp-scene-bar");
+        document.body.classList.toggle("mode-companion", mode === "companion");
+        document.body.classList.toggle("mode-project", mode === "project");
         const searchWrap = document.getElementById("history-search-wrap");
         const title = document.getElementById("sidebar-title");
-        const nameLabel = document.getElementById("model-name-label");
-        if (tabs) tabs.classList.toggle("hidden", mode !== "roleplay");
-        if (sceneBar) sceneBar.classList.toggle("hidden", mode !== "roleplay");
-        if (searchWrap) searchWrap.classList.toggle("hidden", mode === "roleplay" && rpTab !== "worlds");
-        if (title) {
-            const i18n = window.BobigoI18n;
-            title.textContent = i18n
-                ? i18n.t(config.language, mode === "roleplay" ? "roleplay" : "conversations")
-                : (mode === "roleplay" ? "Roleplay" : "Cuộc trò chuyện");
-        }
-        if (nameLabel) nameLabel.textContent = mode === "roleplay" ? "Roleplay" : "Bobigo 35B";
+        const i18n = window.BobigoI18n;
+        if (searchWrap) searchWrap.classList.toggle("hidden", mode !== "chat");
+        const titleKey = mode === "companion" ? "companions" : (mode === "project" ? "projects" : "conversations");
+        if (title) title.textContent = i18n ? i18n.t(config.language, titleKey) : titleKey;
+        setModeLabel();
         applyWelcomeCopy();
         renderSidebar();
         renderCurrentSession();
-        syncRpSceneBar();
-        syncPersonaFields();
-        if (appMode !== "roleplay") {
-            const i18n = window.BobigoI18n;
-            const sub = document.getElementById("welcome-sub");
-            const h1 = document.getElementById("welcome-h1");
-            if (i18n && sub) sub.textContent = i18n.t(config.language, "welcomeSub");
-            if (i18n && h1) h1.innerHTML = `${i18n.t(config.language, "welcomeTitle")}<span class="gradient-text">Bobigo</span>`;
+    }
+
+    // Update the topbar conversation title from the active session/companion.
+    function setModeLabel() {
+        const titleEl = document.getElementById("convo-title");
+        if (!titleEl) return;
+        const i18n = window.BobigoI18n;
+        const lang = config.language || "vi";
+        const s = getActiveSession();
+        if (appMode === "companion") {
+            titleEl.textContent = s ? (s.name || (i18n ? i18n.t(lang, "companions") : "Companion")) : (i18n ? i18n.t(lang, "companions") : "Companions");
+        } else {
+            titleEl.textContent = (s && s.title) ? s.title : (i18n ? i18n.t(lang, "conversations") : "Cuộc trò chuyện");
         }
     }
 
@@ -925,7 +1064,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!welcomeScreen || !welcomeDefaultHTML) return;
         const i18n = window.BobigoI18n;
         const lang = config.language || "vi";
-        if (appMode !== "roleplay") {
+        if (appMode !== "companion") {
             welcomeScreen.innerHTML = welcomeDefaultHTML;
             if (i18n) {
                 const sub = document.getElementById("welcome-sub");
@@ -946,217 +1085,359 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             return;
         }
-        welcomeScreen.querySelector("h1").innerHTML = i18n ? i18n.t(lang, "rpWelcomeH1") : 'Vào <span class="gradient-text">cảnh</span>';
+        // Companion welcome
+        const c = getActiveSession();
+        const h1 = welcomeScreen.querySelector("h1");
         const p = welcomeScreen.querySelector("p");
-        if (p) p.textContent = i18n ? i18n.t(lang, "rpWelcomeSub") : "Tạo nhân vật, ghim ký ức — AI nhớ chi tiết trong kịch bản này.";
         const grid = welcomeScreen.querySelector(".suggestions-grid");
-        if (grid) {
-            grid.innerHTML = `
-                <button class="suggestion-card" data-prompt="${escapeHtml(i18n ? i18n.t(lang, "rpCard1Prompt") : "")}">
-                    <div class="card-header-icon"><i class="fa-solid fa-dungeon"></i></div>
-                    <div class="card-title">${escapeHtml(i18n ? i18n.t(lang, "rpCard1Title") : "Quán rượu cảng")}</div>
-                    <div class="card-desc">${escapeHtml(i18n ? i18n.t(lang, "rpCard1Desc") : "Fantasy — gặp bạn đồng hành")}</div>
-                </button>
-                <button class="suggestion-card" data-prompt="${escapeHtml(i18n ? i18n.t(lang, "rpCard2Prompt") : "")}">
-                    <div class="card-header-icon"><i class="fa-solid fa-user-secret"></i></div>
-                    <div class="card-title">${escapeHtml(i18n ? i18n.t(lang, "rpCard2Title") : "Noir")}</div>
-                    <div class="card-desc">${escapeHtml(i18n ? i18n.t(lang, "rpCard2Desc") : "Đêm mưa, một vụ mất tích")}</div>
-                </button>
-                <button class="suggestion-card" data-prompt="${escapeHtml(i18n ? i18n.t(lang, "rpCard3Prompt") : "")}">
-                    <div class="card-header-icon"><i class="fa-solid fa-mug-hot"></i></div>
-                    <div class="card-title">${escapeHtml(i18n ? i18n.t(lang, "rpCard3Title") : "Đời thường")}</div>
-                    <div class="card-desc">${escapeHtml(i18n ? i18n.t(lang, "rpCard3Desc") : "Hội thoại chậm, quan hệ")}</div>
-                </button>
-                <button class="suggestion-card" data-rp-action="generate">
-                    <div class="card-header-icon"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
-                    <div class="card-title">${escapeHtml((i18n && i18n.t(lang, "generate")) || "Tạo từ mô tả")}</div>
-                    <div class="card-desc">${escapeHtml((i18n && i18n.t(lang, "generateHint")) || "")}</div>
-                </button>
-                <button class="suggestion-card" data-rp-action="new-char">
+        if (c) {
+            if (h1) h1.innerHTML = `<span class="welcome-ava">${companionAvatarHTML(c)}</span> <span class="gradient-text">${escapeHtml(c.name || "")}</span>`;
+            if (p) p.textContent = c.tagline || (lang === "en" ? "Say hello to start chatting." : "Chào một câu để bắt đầu trò chuyện.");
+            if (grid) grid.innerHTML = "";
+        } else {
+            if (h1) h1.innerHTML = i18n ? i18n.t(lang, "companionsWelcomeH1") : 'Tạo <span class="gradient-text">Companion</span>';
+            if (p) p.textContent = i18n ? i18n.t(lang, "companionsWelcomeSub") : "Tạo một nhân vật AI có tính cách và kiến thức riêng để trò chuyện.";
+            if (grid) {
+                grid.innerHTML = `<button class="suggestion-card" data-comp-action="new">
                     <div class="card-header-icon"><i class="fa-solid fa-user-plus"></i></div>
-                    <div class="card-title">${escapeHtml((i18n && i18n.t(lang, "rpCard4Title")) || "Tạo nhân vật")}</div>
-                    <div class="card-desc">${escapeHtml((i18n && i18n.t(lang, "rpCard4Desc")) || "Mở form cấu hình chi tiết")}</div>
+                    <div class="card-title">${escapeHtml(i18n ? i18n.t(lang, "newCompanion") : "Companion mới")}</div>
+                    <div class="card-desc">${escapeHtml(i18n ? i18n.t(lang, "newCompanionDesc") : "Đặt tên, tính cách, nạp kiến thức")}</div>
                 </button>`;
-            grid.querySelectorAll(".suggestion-card").forEach((card) => {
-                card.addEventListener("click", () => {
-                    if (card.getAttribute("data-rp-action") === "generate") {
-                        openGenerateModal();
-                        return;
-                    }
-                    if (card.getAttribute("data-rp-action") === "new-char") {
-                        openCharacterEditor(null);
-                        return;
-                    }
-                    const prompt = card.getAttribute("data-prompt");
-                    if (prompt) {
-                        userInput.value = prompt;
-                        handleSendMessage();
-                    }
-                });
-            });
+                const b = grid.querySelector(".suggestion-card");
+                if (b) b.addEventListener("click", () => openCompanionEditor(null));
+            }
         }
     }
 
     function renderSidebar() {
-        const castPane = document.getElementById("rp-cast-pane");
-        const memPane = document.getElementById("rp-memory-pane");
-        const list = historyList;
         const searchWrap = document.getElementById("history-search-wrap");
         const footer = document.getElementById("sidebar-footer");
-        if (appMode !== "roleplay") {
-            if (castPane) castPane.classList.add("hidden");
-            if (memPane) memPane.classList.add("hidden");
-            if (list) list.classList.remove("hidden");
+        if (appMode === "companion") {
+            if (searchWrap) searchWrap.classList.add("hidden");
+            if (footer) footer.classList.add("hidden");
+            renderCompanionList();
+        } else if (appMode === "project") {
+            if (searchWrap) searchWrap.classList.add("hidden");
+            if (footer) footer.classList.add("hidden");
+            if (currentProjectId) renderProjectChats(); else renderProjectList();
+        } else {
             if (searchWrap) searchWrap.classList.remove("hidden");
             if (footer) footer.classList.remove("hidden");
             renderHistoryList();
-            return;
-        }
-        if (footer) footer.classList.add("hidden");
-        if (rpTab === "cast") {
-            if (list) list.classList.add("hidden");
-            if (searchWrap) searchWrap.classList.add("hidden");
-            if (castPane) castPane.classList.remove("hidden");
-            if (memPane) memPane.classList.add("hidden");
-            renderCastList();
-        } else if (rpTab === "memory") {
-            if (list) list.classList.add("hidden");
-            if (searchWrap) searchWrap.classList.add("hidden");
-            if (castPane) castPane.classList.add("hidden");
-            if (memPane) memPane.classList.remove("hidden");
-            renderMemoryList();
-        } else {
-            if (list) list.classList.remove("hidden");
-            if (searchWrap) searchWrap.classList.remove("hidden");
-            if (castPane) castPane.classList.add("hidden");
-            if (memPane) memPane.classList.add("hidden");
-            renderWorldList();
         }
     }
 
-    function renderWorldList(filterQuery) {
+    function companionAvatarHTML(c) {
+        if (c && c.avatar) return `<img class="companion-avatar-img" src="${c.avatar}" alt="">`;
+        return escapeHtml((c && c.emoji) || "🎭");
+    }
+
+    // Downscale + center-crop an image file to a small square data-URL (keeps
+    // localStorage tiny — avatars end up ~5–15KB).
+    function resizeImageToDataURL(file, size = 128, quality = 0.85) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                const s = Math.min(img.width, img.height);
+                const sx = (img.width - s) / 2, sy = (img.height - s) / 2;
+                const canvas = document.createElement("canvas");
+                canvas.width = size; canvas.height = size;
+                canvas.getContext("2d").drawImage(img, sx, sy, s, s, 0, 0, size, size);
+                resolve(canvas.toDataURL("image/jpeg", quality));
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+            img.src = url;
+        });
+    }
+
+    function renderCompanionList() {
         historyList.innerHTML = "";
         const i18n = window.BobigoI18n;
         const lang = config.language || "vi";
-        const q = (filterQuery || "").toLowerCase();
-        const filtered = q ? worlds.filter((w) => (w.title || "").toLowerCase().includes(q)) : worlds;
-        if (filtered.length === 0) {
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "companion-new-btn";
+        addBtn.innerHTML = `<i class="fa-solid fa-plus"></i> ${escapeHtml(i18n ? i18n.t(lang, "newCompanion") : "Companion mới")}`;
+        addBtn.addEventListener("click", () => openCompanionEditor(null));
+        historyList.appendChild(addBtn);
+
+        if (!companions.length) {
             const empty = document.createElement("div");
             empty.className = "history-empty";
-            empty.textContent = i18n ? i18n.t(lang, "noWorlds") : "Chưa có kịch bản.";
+            empty.textContent = i18n ? i18n.t(lang, "noCompanions") : "Chưa có companion nào.";
             historyList.appendChild(empty);
             return;
         }
-        filtered.forEach((world) => {
+
+        companions.forEach((c) => {
             const item = document.createElement("div");
-            const genning = activeGenerations.has(world.id) ? "is-generating" : "";
-            item.className = `history-item ${world.id === currentWorldId ? "active" : ""} ${genning}`;
-            const charLabel = i18n ? i18n.t(lang, "charCount") : "nhân vật";
-            const memLabel = i18n ? i18n.t(lang, "memCount") : "ký ức";
-            const delTitle = i18n ? i18n.t(lang, "deleteScenario") : "Xóa kịch bản";
+            const genning = activeGenerations.has(c.id) ? "is-generating" : "";
+            item.className = `companion-card ${c.id === currentCompanionId ? "active" : ""} ${genning}`;
+            const kn = (c.knowledge || []).length;
+            const knLabel = i18n ? i18n.t(lang, "knowledgeItems") : "mục kiến thức";
             item.innerHTML = `
-                <div class="history-title-wrap">
-                    <i class="fa-solid fa-masks-theater"></i>
-                    <div>
-                        <span class="history-item-title">${escapeHtml(world.title)}</span>
-                        <span class="history-item-time">${(world.characters || []).length} ${charLabel} · ${(world.memory || []).length} ${memLabel}</span>
-                    </div>
+                <div class="companion-emoji">${companionAvatarHTML(c)}</div>
+                <div class="companion-meta">
+                    <div class="companion-name">${escapeHtml(c.name || "")}</div>
+                    <div class="companion-tag">${escapeHtml(c.tagline || `${kn} ${knLabel}`)}</div>
                 </div>
-                <i class="fa-solid fa-xmark history-delete-btn" title="${delTitle}"></i>`;
+                <button type="button" class="companion-edit" title="${i18n ? i18n.t(lang, "editCompanion") : "Sửa"}"><i class="fa-solid fa-pen"></i></button>`;
             item.addEventListener("click", (e) => {
-                if (e.target.classList.contains("history-delete-btn")) return;
-                currentWorldId = world.id;
+                if (e.target.closest(".companion-edit")) return;
+                currentCompanionId = c.id;
                 renderSidebar();
                 renderCurrentSession();
-                syncRpSceneBar();
-                syncPersonaFields();
+                setModeLabel();
                 if (isMobile()) closeAllDrawers();
             });
-            item.querySelector(".history-delete-btn").addEventListener("click", (e) => {
+            item.querySelector(".companion-edit").addEventListener("click", (e) => {
                 e.stopPropagation();
-                worlds = worlds.filter((w) => w.id !== world.id);
-                if (worlds.length === 0) worlds = [BobigoRP.newWorld({ language: config.language || "vi" })];
-                if (currentWorldId === world.id) currentWorldId = worlds[0].id;
-                saveSessions();
-                renderSidebar();
-                renderCurrentSession();
+                openCompanionEditor(c.id);
             });
             historyList.appendChild(item);
         });
     }
 
-    function renderCastList() {
-        const list = document.getElementById("cast-list");
-        if (!list) return;
-        const world = getActiveSession();
-        const i18n = window.BobigoI18n;
-        const lang = config.language || "vi";
-        list.innerHTML = "";
-        (world.characters || []).forEach((ch) => {
-            const card = document.createElement("div");
-            card.className = "cast-card" + (ch.enabled === false ? " off" : "");
-            card.innerHTML = `
-                <div class="cast-swatch" style="background:${escapeHtml(ch.color || "#ef233c")}"></div>
-                <div class="cast-meta">
-                    <div class="cast-name">${escapeHtml(ch.name || (i18n ? i18n.t(lang, "unnamedChar") : "Chưa đặt tên"))}</div>
-                    <div class="cast-role">${escapeHtml(ch.role || "npc")}</div>
-                </div>`;
-            card.addEventListener("click", () => openCharacterEditor(ch.id));
-            list.appendChild(card);
-        });
-    }
-
-    function renderMemoryList() {
-        const list = document.getElementById("memory-list");
-        if (!list) return;
-        const world = getActiveSession();
-        const i18n = window.BobigoI18n;
-        const lang = config.language || "vi";
-        list.innerHTML = "";
-        const mem = world.memory || [];
-        if (mem.length === 0) {
-            list.innerHTML = `<div class="history-empty">${i18n ? i18n.t(lang, "noMemory") : "Chưa ghim ký ức. Model sẽ tự thêm khi có dòng <<nhớ: …>>."}</div>`;
+    // --- Projects: sidebar list, chats view, editor ------------------------
+    function renderProjectList() {
+        historyList.innerHTML = "";
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        const addBtn = document.createElement("button");
+        addBtn.type = "button"; addBtn.className = "companion-new-btn";
+        addBtn.innerHTML = `<i class="fa-solid fa-plus"></i> ${escapeHtml(t("newProject", "Dự án mới"))}`;
+        addBtn.addEventListener("click", () => openProjectEditor(null));
+        historyList.appendChild(addBtn);
+        if (!projects.length) {
+            const empty = document.createElement("div");
+            empty.className = "history-empty";
+            empty.textContent = t("noProjects", "Chưa có dự án nào.");
+            historyList.appendChild(empty);
             return;
         }
-        mem.forEach((fact) => {
-            const row = document.createElement("div");
-            row.className = "memory-item";
-            row.innerHTML = `<span>${escapeHtml(fact.text)}</span><button type="button" title="Xóa">&times;</button>`;
-            row.querySelector("button").addEventListener("click", () => {
-                world.memory = (world.memory || []).filter((m) => m.id !== fact.id);
-                saveSessions();
-                renderMemoryList();
+        projects.forEach((p) => {
+            const chats = sessions.filter((s) => s.projectId === p.id).length;
+            const item = document.createElement("div");
+            item.className = "companion-card project-card";
+            item.innerHTML = `
+                <div class="project-icon" style="color:${escapeHtml(p.color || "#ef233c")}"><i class="fa-solid fa-folder"></i></div>
+                <div class="companion-meta">
+                    <div class="companion-name">${escapeHtml(p.name || "")}</div>
+                    <div class="companion-tag">${chats} ${escapeHtml(t("projectChats", "đoạn chat"))}${(p.knowledge && p.knowledge.length) ? ` · ${p.knowledge.length} ${escapeHtml(t("knowledgeItems", "mục kiến thức"))}` : ""}</div>
+                </div>
+                <button type="button" class="companion-edit" title="${t("editProject", "Sửa")}"><i class="fa-solid fa-pen"></i></button>`;
+            item.addEventListener("click", (e) => {
+                if (e.target.closest(".companion-edit")) return;
+                openProject(p.id);
             });
-            list.appendChild(row);
+            item.querySelector(".companion-edit").addEventListener("click", (e) => { e.stopPropagation(); openProjectEditor(p.id); });
+            historyList.appendChild(item);
         });
     }
 
-    function syncRpSceneBar() {
-        const el = document.getElementById("rp-scene-title");
-        const world = getActiveSession();
-        const i18n = window.BobigoI18n;
-        const lang = config.language || "vi";
-        if (el && appMode === "roleplay" && world) {
-            el.textContent = world.title || (i18n ? i18n.t(lang, "newWorld") : "Kịch bản");
+    function openProject(id) {
+        currentProjectId = id;
+        const chats = sessions.filter((s) => s.projectId === id);
+        if (chats.length) {
+            currentSessionId = chats[0].id;
+            renderSidebar();
+            renderCurrentSession();
+        } else {
+            createProjectChat(id);
         }
     }
 
-    function syncPersonaFields() {
-        const world = getActiveSession();
-        const name = document.getElementById("rp-user-name");
-        const desc = document.getElementById("rp-user-desc");
-        if (!world || !world.userPersona) return;
-        if (name) name.value = world.userPersona.name || "";
-        if (desc) desc.value = world.userPersona.description || "";
+    function createProjectChat(projectId) {
+        const s = {
+            id: "session_" + Date.now(),
+            title: config.language === "en" ? "New chat" : "Chat mới",
+            createdAt: new Date().toISOString(),
+            messages: [],
+            projectId,
+        };
+        sessions.unshift(s);
+        currentSessionId = s.id;
+        localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+        renderSidebar();
+        renderCurrentSession();
+        if (isMobile()) closeAllDrawers();
+    }
+
+    function renderProjectChats() {
+        historyList.innerHTML = "";
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        const p = getCurrentProject();
+        if (!p) { currentProjectId = null; renderProjectList(); return; }
+        const header = document.createElement("div");
+        header.className = "project-header";
+        header.innerHTML = `
+            <button type="button" class="project-back" title="${t("backToProjects", "Danh sách dự án")}"><i class="fa-solid fa-arrow-left"></i></button>
+            <span class="project-title"><i class="fa-solid fa-folder" style="color:${escapeHtml(p.color || "#ef233c")}"></i> ${escapeHtml(p.name || "")}</span>
+            <button type="button" class="project-edit-btn" title="${t("editProject", "Sửa dự án")}"><i class="fa-solid fa-sliders"></i></button>`;
+        header.querySelector(".project-back").addEventListener("click", () => { currentProjectId = null; renderSidebar(); renderCurrentSession(); });
+        header.querySelector(".project-edit-btn").addEventListener("click", () => openProjectEditor(p.id));
+        historyList.appendChild(header);
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button"; addBtn.className = "companion-new-btn";
+        addBtn.innerHTML = `<i class="fa-solid fa-plus"></i> ${escapeHtml(t("newChatInProject", "Chat mới trong dự án"))}`;
+        addBtn.addEventListener("click", () => createProjectChat(p.id));
+        historyList.appendChild(addBtn);
+
+        const chats = sessions.filter((s) => s.projectId === p.id);
+        if (!chats.length) {
+            const empty = document.createElement("div");
+            empty.className = "history-empty";
+            empty.textContent = t("noProjectChats", "Chưa có chat nào.");
+            historyList.appendChild(empty);
+            return;
+        }
+        chats.forEach((session) => {
+            const isGen = activeGenerations.has(session.id);
+            const item = document.createElement("div");
+            item.className = `history-item ${session.id === currentSessionId ? "active" : ""} ${isGen ? "is-generating" : ""}`;
+            item.innerHTML = `
+                <div class="history-title-wrap"><i class="fa-regular fa-message"></i>
+                    <div><span class="history-item-title">${escapeHtml(session.title)}</span>
+                    <span class="history-item-time">${relativeTime(session.createdAt, lang)}</span></div>
+                </div>
+                <i class="fa-solid fa-xmark history-delete-btn"></i>`;
+            item.addEventListener("click", (e) => {
+                if (e.target.classList.contains("history-delete-btn")) return;
+                currentSessionId = session.id; renderSidebar(); renderCurrentSession();
+                if (isMobile()) closeAllDrawers();
+            });
+            item.querySelector(".history-delete-btn").addEventListener("click", (e) => {
+                e.stopPropagation();
+                sessions = sessions.filter((s) => s.id !== session.id);
+                if (currentSessionId === session.id) {
+                    const rest = sessions.filter((s) => s.projectId === p.id);
+                    currentSessionId = rest.length ? rest[0].id : null;
+                }
+                localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+                renderSidebar(); renderCurrentSession();
+            });
+            historyList.appendChild(item);
+        });
+    }
+
+    // --- Project editor (name, instructions, knowledge) --------------------
+    const projectModal = document.getElementById("project-modal");
+    const projectBody = document.getElementById("project-modal-body");
+    document.getElementById("project-modal-close")?.addEventListener("click", closeProjectEditor);
+    projectModal?.addEventListener("click", (e) => { if (e.target === projectModal) closeProjectEditor(); });
+    document.getElementById("project-save-btn")?.addEventListener("click", saveProjectEditor);
+    document.getElementById("project-delete-btn")?.addEventListener("click", deleteProjectEditor);
+    function closeProjectEditor() { projectModal?.classList.add("hidden"); }
+
+    function openProjectEditor(id) {
+        if (!window.BobigoProjects || !projectModal || !projectBody) return;
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        let p = projects.find((x) => x.id === id);
+        const isNew = !p;
+        if (!p) p = BobigoProjects.newProject({ language: lang });
+        let knowledge = (p.knowledge || []).slice();
+        document.getElementById("project-modal-title").textContent = isNew ? t("newProject", "Dự án mới") : t("editProject", "Sửa dự án");
+        projectBody.innerHTML = `
+            <div class="config-group"><label>${t("projectName", "Tên dự án")}</label><input id="p-name" value="${escapeHtml(p.name || "")}"></div>
+            <div class="config-group"><label>${t("projectInstructions", "Hướng dẫn chung")}</label><textarea id="p-instructions" rows="4" placeholder="${t("projectInstructionsPh", "Cách Bobigo nên hỗ trợ trong dự án này…")}">${escapeHtml(p.instructions || "")}</textarea></div>
+            <div class="config-group">
+                <label>${t("projectKnowledge", "Kiến thức dự án")}</label>
+                <div class="kn-list" id="p-knowledge"></div>
+                <div class="kn-add">
+                    <input id="p-kn-note" placeholder="${t("knowledgeNotePh", "Dán ghi chú / dữ kiện…")}">
+                    <button type="button" class="btn-icon-sm" id="p-kn-add-btn" title="${t("addNote", "Thêm ghi chú")}"><i class="fa-solid fa-plus"></i></button>
+                    <button type="button" class="btn-icon-sm" id="p-kn-file-btn" title="${t("uploadFile", "Tải tệp")}"><i class="fa-solid fa-paperclip"></i></button>
+                    <input type="file" id="p-kn-file" accept=".pdf,.txt,.md,.json,.csv,.py,.js,.html,.css" style="display:none">
+                </div>
+            </div>`;
+        function renderKn() {
+            const el = document.getElementById("p-knowledge");
+            el.innerHTML = knowledge.length
+                ? knowledge.map((k) => `<div class="kn-item" data-kn="${k.id}"><span class="kn-name">${escapeHtml(k.name || "note")}</span><span class="kn-size">${(k.text || "").length} ch</span><button type="button" class="kn-del"><i class="fa-solid fa-xmark"></i></button></div>`).join("")
+                : `<div class="kn-empty">${t("noKnowledge", "Chưa có. Thêm ghi chú hoặc tải tệp.")}</div>`;
+            el.querySelectorAll(".kn-item").forEach((row) => row.querySelector(".kn-del").addEventListener("click", () => {
+                knowledge = knowledge.filter((k) => k.id !== row.getAttribute("data-kn")); renderKn();
+            }));
+        }
+        renderKn();
+        document.getElementById("p-kn-add-btn").addEventListener("click", () => {
+            const txt = (document.getElementById("p-kn-note").value || "").trim(); if (!txt) return;
+            knowledge.push({ id: BobigoProjects.uid("kn"), name: txt.slice(0, 24) + (txt.length > 24 ? "…" : ""), text: txt, source: "note" });
+            document.getElementById("p-kn-note").value = ""; renderKn();
+        });
+        document.getElementById("p-kn-file-btn").addEventListener("click", () => document.getElementById("p-kn-file").click());
+        document.getElementById("p-kn-file").addEventListener("change", async (e) => {
+            const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
+            try {
+                const fd = new FormData(); fd.append("file", f);
+                const resp = await fetch("/api/extract-file", { method: "POST", body: fd });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || "extract failed");
+                knowledge.push({ id: BobigoProjects.uid("kn"), name: f.name, text: data.text || "", source: "file" });
+                renderKn();
+            } catch (err) { alert(t("knowledgeFail", "Lỗi đọc tệp: ") + (err.message || err)); }
+        });
+        projectModal._draft = { p, isNew, getKnowledge: () => knowledge };
+        projectModal.classList.remove("hidden");
+        const delBtn = document.getElementById("project-delete-btn");
+        if (delBtn) delBtn.style.display = isNew ? "none" : "";
+    }
+
+    function saveProjectEditor() {
+        if (!projectModal || !projectModal._draft) return;
+        const { p, isNew, getKnowledge } = projectModal._draft;
+        p.name = (document.getElementById("p-name").value || "").trim() || (config.language === "en" ? "Project" : "Dự án");
+        p.instructions = (document.getElementById("p-instructions").value || "").trim();
+        p.knowledge = getKnowledge();
+        if (isNew) projects.unshift(p);
+        BobigoProjects.saveProjects(projects);
+        closeProjectEditor();
+        if (appMode !== "project") { setMode("project"); setNavActive(railProjectsBtn); }
+        if (isNew) openProject(p.id); else { renderSidebar(); renderCurrentSession(); }
+    }
+
+    function deleteProjectEditor() {
+        if (!projectModal || !projectModal._draft) return;
+        const { p } = projectModal._draft;
+        projects = projects.filter((x) => x.id !== p.id);
+        BobigoProjects.saveProjects(projects);
+        // orphan its chats back to plain chat list
+        sessions.forEach((s) => { if (s.projectId === p.id) delete s.projectId; });
+        localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+        if (currentProjectId === p.id) currentProjectId = null;
+        closeProjectEditor();
+        renderSidebar();
+        renderCurrentSession();
     }
 
     function renderHistoryList(filterQuery = "") {
+        closeChatMenu();
         historyList.innerHTML = "";
         const i18n = window.BobigoI18n;
         const lang = config.language || "vi";
-        const filtered = filterQuery
-            ? sessions.filter(s => s.title.toLowerCase().includes(filterQuery.toLowerCase()))
-            : sessions;
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "companion-new-btn";
+        addBtn.innerHTML = `<i class="fa-solid fa-plus"></i> ${escapeHtml(t("newChat", "Cuộc trò chuyện mới"))}`;
+        addBtn.addEventListener("click", () => {
+            createNewSession(true);
+            if (isMobile()) closeAllDrawers();
+        });
+        historyList.appendChild(addBtn);
+
+        // The main chat list excludes chats that belong to a project.
+        const base = sessions.filter(s => !s.projectId);
+        let filtered = filterQuery
+            ? base.filter(s => (s.title || "").toLowerCase().includes(filterQuery.toLowerCase()))
+            : base;
 
         if (filtered.length === 0) {
             const empty = document.createElement("div");
@@ -1166,40 +1447,145 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
+        // pinned chats float to the top (stable otherwise)
+        filtered = filtered.slice().sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
         filtered.forEach(session => {
             const isGen = activeGenerations.has(session.id);
             const item = document.createElement("div");
-            item.className = `history-item ${session.id === currentSessionId ? "active" : ""} ${isGen ? "is-generating" : ""}`;
+            item.className = `history-item ${session.id === currentSessionId ? "active" : ""} ${isGen ? "is-generating" : ""} ${session.pinned ? "pinned" : ""}`;
             item.setAttribute("data-id", session.id);
-            const delTitle = i18n ? i18n.t(lang, "deleteChat") : "Xóa đoạn chat";
 
             item.innerHTML = `
-                <div class="history-title-wrap">
-                    <i class="fa-regular fa-message"></i>
-                    <div>
-                        <span class="history-item-title">${escapeHtml(session.title)}</span>
-                        <span class="history-item-time">${relativeTime(session.createdAt, config.language || "vi")}</span>
-                    </div>
+                <span class="hist-ic"><i class="fa-${session.pinned ? "solid fa-thumbtack" : "regular fa-message"}"></i></span>
+                <div class="hist-text">
+                    <span class="history-item-title">${escapeHtml(session.title || "")}</span>
+                    <span class="history-item-time">${relativeTime(session.createdAt, lang)}</span>
                 </div>
-                <i class="fa-solid fa-xmark history-delete-btn" title="${delTitle}"></i>
-            `;
+                <button type="button" class="hist-menu-btn" title="${t("moreActions", "Tùy chọn")}"><i class="fa-solid fa-ellipsis"></i></button>`;
 
             item.addEventListener("click", (e) => {
-                if (e.target.classList.contains("history-delete-btn")) return;
+                if (e.target.closest(".hist-menu-btn")) return;
+                if (item.querySelector(".hist-rename-input")) return;
                 currentSessionId = session.id;
                 renderHistoryList(filterQuery);
                 renderCurrentSession();
                 if (isMobile()) closeAllDrawers();
             });
-
-            const deleteBtn = item.querySelector(".history-delete-btn");
-            deleteBtn.addEventListener("click", (e) => {
+            item.querySelector(".hist-menu-btn").addEventListener("click", (e) => {
                 e.stopPropagation();
-                deleteSession(session.id);
+                openChatMenu(e.currentTarget, session, filterQuery);
             });
-
             historyList.appendChild(item);
         });
+    }
+
+    // --- Chat item actions: menu, rename, pin, add-to-project --------------
+    function closeChatMenu() { document.querySelectorAll(".chat-menu").forEach((m) => m.remove()); }
+
+    function openChatMenu(anchor, session, filterQuery) {
+        closeChatMenu();
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        const menu = document.createElement("div");
+        menu.className = "chat-menu";
+        menu.innerHTML = `
+            <button data-act="pin"><i class="fa-solid fa-thumbtack"></i><span>${session.pinned ? t("unpin", "Bỏ ghim") : t("pin", "Ghim")}</span><kbd>P</kbd></button>
+            <button data-act="rename"><i class="fa-solid fa-pen"></i><span>${t("rename", "Đổi tên")}</span><kbd>F2</kbd></button>
+            <button data-act="project"><i class="fa-solid fa-folder-plus"></i><span>${t("addToProject", "Thêm vào dự án")}</span><kbd>M</kbd></button>
+            <div class="chat-menu-sep"></div>
+            <button data-act="delete" class="danger"><i class="fa-regular fa-trash-can"></i><span>${t("del", "Xóa")}</span><kbd>⌫</kbd></button>`;
+        document.body.appendChild(menu);
+        const r = anchor.getBoundingClientRect();
+        const mw = menu.offsetWidth || 210;
+        menu.style.top = Math.round(r.bottom + 4) + "px";
+        menu.style.left = Math.round(Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8))) + "px";
+        menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const act = b.getAttribute("data-act");
+            const anc = anchor;
+            closeChatMenu();
+            if (act === "pin") togglePinSession(session.id);
+            else if (act === "rename") startRenameSession(session.id);
+            else if (act === "project") openProjectPicker(session, anc);
+            else if (act === "delete") deleteSession(session.id);
+        }));
+        setTimeout(() => document.addEventListener("click", closeChatMenu, { once: true }), 0);
+    }
+
+    function togglePinSession(id) {
+        const s = sessions.find((x) => x.id === id);
+        if (!s) return;
+        s.pinned = !s.pinned;
+        saveSessions();
+        renderHistoryList();
+    }
+
+    function startRenameSession(id) {
+        openHistoryDrawer(); // make sure the item is visible to edit
+        const item = historyList.querySelector(`.history-item[data-id="${id}"]`);
+        const session = sessions.find((s) => s.id === id);
+        if (!item || !session) return;
+        const titleEl = item.querySelector(".history-item-title");
+        if (!titleEl) return;
+        const input = document.createElement("input");
+        input.className = "hist-rename-input";
+        input.value = session.title || "";
+        titleEl.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        const commit = (save) => {
+            if (done) return;
+            done = true;
+            if (save) {
+                const v = input.value.trim();
+                if (v) session.title = v;
+                saveSessions();
+            }
+            renderHistoryList();
+            setModeLabel();
+        };
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(true); }
+            else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+        });
+        input.addEventListener("blur", () => commit(true));
+        input.addEventListener("click", (e) => e.stopPropagation());
+    }
+
+    function openProjectPicker(session, anchor) {
+        closeChatMenu();
+        if (!window.BobigoProjects) return;
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        const menu = document.createElement("div");
+        menu.className = "chat-menu project-picker";
+        const items = projects.map((p) =>
+            `<button data-pid="${p.id}"><i class="fa-solid fa-folder" style="color:${escapeHtml(p.color || "#ef233c")}"></i><span>${escapeHtml(p.name || "")}</span></button>`).join("");
+        menu.innerHTML = (projects.length ? items : `<div class="chat-menu-empty">${t("noProjects", "Chưa có dự án")}</div>`)
+            + `<div class="chat-menu-sep"></div><button data-pid="__new"><i class="fa-solid fa-plus"></i><span>${t("newProject", "Dự án mới")}</span></button>`;
+        document.body.appendChild(menu);
+        const r = anchor.getBoundingClientRect();
+        const mw = menu.offsetWidth || 220;
+        menu.style.top = Math.round(r.bottom + 4) + "px";
+        menu.style.left = Math.round(Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8))) + "px";
+        menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const pid = b.getAttribute("data-pid");
+            closeChatMenu();
+            if (pid === "__new") {
+                const p = BobigoProjects.newProject({ language: config.language });
+                projects.unshift(p);
+                BobigoProjects.saveProjects(projects);
+                session.projectId = p.id;
+            } else {
+                session.projectId = pid;
+            }
+            saveSessions();
+            renderHistoryList();
+        }));
+        setTimeout(() => document.addEventListener("click", closeChatMenu, { once: true }), 0);
     }
 
     function deleteSession(id) {
@@ -1239,7 +1625,7 @@ document.addEventListener("DOMContentLoaded", () => {
         sessions.unshift(newSession);
         currentSessionId = newSession.id;
         saveSessions();
-        if (appMode === "roleplay") renderSidebar();
+        if (appMode === "companion") renderSidebar();
         else renderHistoryList();
         renderCurrentSession();
         if (isMobile()) closeAllDrawers();
@@ -1363,11 +1749,23 @@ document.addEventListener("DOMContentLoaded", () => {
     function renderCurrentSession() {
         const session = getActiveSession();
         messagesContainer.innerHTML = "";
+        setModeLabel();
+
+        if (!session) {
+            // Companion mode with no companion selected yet — show create prompt.
+            applyWelcomeCopy();
+            messagesContainer.appendChild(welcomeScreen);
+            welcomeScreen.style.display = "block";
+            setGenerating(false);
+            updateContextMeter();
+            return;
+        }
 
         const isThisSessionGenerating = activeGenerations.has(session.id);
         setGenerating(isThisSessionGenerating);
 
         if (!session.messages || session.messages.length === 0) {
+            applyWelcomeCopy(); // refresh welcome for the active companion/mode
             messagesContainer.appendChild(welcomeScreen);
             welcomeScreen.style.display = "block";
         } else {
@@ -1681,7 +2079,15 @@ document.addEventListener("DOMContentLoaded", () => {
             : userInput.value.trim();
         if (!rawText && (!attachedFiles || attachedFiles.length === 0) && !(opts && opts.fullContent)) return;
 
+        if (appMode === "project" && currentProjectId && !getActiveSession()) {
+            createProjectChat(currentProjectId); // ensure a chat exists before sending
+        }
         const targetSession = (opts && opts.sessionId) ? (sessions.find(s => s.id === opts.sessionId) || getActiveSession()) : getActiveSession();
+        if (!targetSession) {
+            // Companion mode with none created yet — open the editor instead.
+            if (appMode === "companion" && typeof openCompanionEditor === "function") openCompanionEditor(null);
+            return;
+        }
         const targetSessionId = targetSession.id;
 
         if (activeGenerations.has(targetSessionId)) return;
@@ -1718,7 +2124,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const titleSource = cleanPrompt || "Đọc tài liệu";
             targetSession.title = titleSource.length > 28 ? titleSource.substring(0, 28) + "..." : titleSource;
             saveSessions();
-            if (appMode === "roleplay") renderSidebar();
+            if (appMode === "companion") renderSidebar();
             else renderHistoryList();
         }
 
@@ -1760,7 +2166,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // --- Web Search Phase (only when agent tools are off) ---
         let searchResults = [];
         let searchContextText = "";
-        if (config.webSearch && config.agentTools === false && appMode !== "roleplay") {
+        if (config.webSearch && config.agentTools === false && appMode !== "companion") {
             const searchQuery = refineSearchQuery(cleanPrompt || "tìm kiếm thông tin");
             let searchingRow = null;
             if (currentSessionId === targetSessionId) {
@@ -1811,7 +2217,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // Update sidebar generating badge
-        if (appMode === "roleplay") renderSidebar();
+        if (appMode === "companion") renderSidebar();
         else renderHistoryList();
 
         // Build Payload
@@ -1830,10 +2236,21 @@ document.addEventListener("DOMContentLoaded", () => {
             };
         }
 
-        const isRp = appMode === "roleplay";
-        const messagesPayload = isRp
-            ? messageContext
-            : [{ role: "system", content: config.systemPrompt }, ...messageContext];
+        const isCompanion = appMode === "companion";
+        let systemContent;
+        if (isCompanion) {
+            systemContent = window.BobigoCompanions
+                ? BobigoCompanions.buildSystemPrompt(targetSession, { contextWindow: contextInfo.window, reserve: contextInfo.reserve })
+                : "";
+        } else {
+            systemContent = config.systemPrompt || "";
+            const proj = targetSession.projectId && window.BobigoProjects ? projects.find((p) => p.id === targetSession.projectId) : null;
+            if (proj) {
+                const ctx = BobigoProjects.buildContext(proj, { contextWindow: contextInfo.window, reserve: contextInfo.reserve, language: config.language });
+                systemContent = (systemContent + "\n\n" + ctx).trim();
+            }
+        }
+        const messagesPayload = [{ role: "system", content: systemContent }, ...messageContext];
 
         const temperature = (opts && typeof opts.temperatureOverride === "number")
             ? opts.temperatureOverride
@@ -1846,12 +2263,9 @@ document.addEventListener("DOMContentLoaded", () => {
             repeat_penalty: config.repeatPenalty,
             max_tokens: config.maxTokens > 0 ? config.maxTokens : undefined,
             stream: true,
-            agent_tools: isRp ? false : config.agentTools !== false,
-            mode: isRp ? "roleplay" : "chat",
+            agent_tools: config.agentTools !== false,
+            mode: "chat",
         };
-        if (isRp && window.BobigoRP) {
-            payload.roleplay = BobigoRP.toPayload(targetSession);
-        }
 
         let fullReasoning = "";
         let fullAssistantContent = "";
@@ -1865,6 +2279,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // enhancement (code cards + hljs) to renderCurrentSession() in finally.
         let pendingRender = false;
         let streamDone = false;
+        const streamStartTime = performance.now();
 
         function getLiveBubble() {
             // Cached ref is fastest; re-acquire if a re-render detached it
@@ -1973,14 +2388,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
 
-            if (isRp && window.BobigoRP) {
-                const harvested = BobigoRP.harvestMemory(fullAssistantContent);
-                harvested.facts.forEach((fact) => BobigoRP.addMemory(targetSession, fact, "model"));
-                fullAssistantContent = harvested.clean;
-                BobigoRP.appendSceneLog(targetSession, cleanPrompt, fullAssistantContent);
-                if (isRp) renderMemoryList();
-            }
-
             assistantMsgObj.content = fullAssistantContent;
             assistantMsgObj.reasoning = fullReasoning;
             assistantMsgObj.toolEvents = toolEvents;
@@ -2008,13 +2415,23 @@ document.addEventListener("DOMContentLoaded", () => {
             streamDone = true;
             delete assistantMsgObj.isStreaming;
             activeGenerations.delete(targetSessionId);
+
+            const durationSec = (performance.now() - streamStartTime) / 1000;
+            const totalChars = (fullAssistantContent || "").length + (fullReasoning || "").length;
+            if (durationSec > 0.3 && totalChars > 0) {
+                const estTokens = estimateTokens(fullAssistantContent + fullReasoning);
+                const tps = (estTokens / durationSec).toFixed(1);
+                localStorage.setItem("bobigo_last_tps", tps);
+                updateHealthSpeedDisplay(tps);
+            }
+
             saveSessions();
 
             if (currentSessionId === targetSessionId) {
                 setGenerating(false);
                 renderCurrentSession();
             }
-            if (appMode === "roleplay") renderSidebar();
+            if (appMode === "companion") renderSidebar();
             else renderHistoryList();
         }
     }
@@ -2271,73 +2688,6 @@ document.addEventListener("DOMContentLoaded", () => {
         downloadFile(jsonStr, `${session.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`, "application/json");
     });
 
-    document.getElementById("export-story-btn")?.addEventListener("click", () => {
-        const session = getActiveSession();
-        const lang = config.language || "vi";
-        const i18n = window.BobigoI18n;
-        let md = `# ${session.title || "Story"}\n\n`;
-        if (appMode === "roleplay" && session.setting) {
-            const s = BobigoRP.normalizeSetting(session.setting);
-            md += `## ${i18n ? i18n.t(lang, "scene") : "Setting"}\n`;
-            Object.entries(s).forEach(([k, v]) => {
-                if (v) md += `- **${k}**: ${v}\n`;
-            });
-            md += "\n";
-            (session.characters || []).forEach((ch) => {
-                md += `### ${ch.name} (${ch.role || "npc"})\n`;
-                if (ch.personality) md += `${ch.personality}\n`;
-                md += "\n";
-            });
-        }
-        md += `---\n\n`;
-        (session.messages || []).forEach((msg) => {
-            const who = msg.role === "user"
-                ? (i18n ? i18n.t(lang, "user") : "User")
-                : (i18n ? i18n.t(lang, "assistant") : "Bobigo");
-            md += `### ${who}\n\n${msg.content || ""}\n\n`;
-        });
-        const slug = String(session.title || "story").replace(/[^a-z0-9]/gi, "_").toLowerCase();
-        downloadFile(md, `${slug}.md`, "text/markdown");
-        const pack = {
-            type: "bobigo-story",
-            version: 1,
-            world: session,
-        };
-        downloadFile(JSON.stringify(pack, null, 2), `${slug}.bobigo.json`, "application/json");
-    });
-
-    document.getElementById("import-story-btn")?.addEventListener("click", () => {
-        document.getElementById("import-story-input")?.click();
-    });
-    document.getElementById("import-story-input")?.addEventListener("change", (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-            try {
-                const parsed = JSON.parse(String(reader.result));
-                let data = parsed;
-                if (parsed && parsed.type === "bobigo-story" && parsed.world) data = parsed.world;
-                if (!window.BobigoRP) return;
-                const world = BobigoRP.worldFromDraft(data, data.language || config.language);
-                world.messages = Array.isArray(data.messages) ? data.messages : [];
-                world.memory = Array.isArray(data.memory) ? data.memory : [];
-                world.sceneLog = Array.isArray(data.sceneLog) ? data.sceneLog : [];
-                if (data.id) world.id = "world_" + Date.now();
-                worlds.unshift(world);
-                currentWorldId = world.id;
-                appMode = "roleplay";
-                BobigoRP.saveWorlds(worlds);
-                setMode("roleplay");
-                setNavActive(railRpBtn);
-            } catch (err) {
-                alert("Import failed: " + err.message);
-            }
-        };
-        reader.readAsText(file);
-    });
-
     // --------------------------------------------------------------------------
     // Config Panel Logic
     // --------------------------------------------------------------------------
@@ -2450,10 +2800,10 @@ document.addEventListener("DOMContentLoaded", () => {
         syncLangButtons();
         const sub = document.getElementById("welcome-sub");
         const h1 = document.getElementById("welcome-h1");
-        if (appMode !== "roleplay" && i18n && sub) {
+        if (appMode !== "companion" && i18n && sub) {
             sub.textContent = i18n.t(config.language, "welcomeSub");
         }
-        if (appMode !== "roleplay" && i18n && h1) {
+        if (appMode !== "companion" && i18n && h1) {
             h1.innerHTML = `${i18n.t(config.language, "welcomeTitle")}<span class="gradient-text">Bobigo</span>`;
         }
         if (userInput && !isGenerating && llmReady) {
@@ -2465,12 +2815,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         const title = document.getElementById("sidebar-title");
         if (title && i18n) {
-            title.textContent = i18n.t(config.language, appMode === "roleplay" ? "roleplay" : "conversations");
+            title.textContent = i18n.t(config.language, appMode === "companion" ? "companions" : "conversations");
         }
-        if (appMode === "roleplay") {
-            const world = getActiveSession();
-            if (world) world.language = config.language;
-            saveSessions();
+        if (appMode === "companion") {
             renderSidebar();
         } else {
             renderHistoryList();
@@ -2482,322 +2829,142 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // --------------------------------------------------------------------------
-    // Roleplay: tabs, persona, memory, character modal
+    // Companions: editor modal + knowledge
     // --------------------------------------------------------------------------
-    let rpEditCharId = null;
-    let rpModalMode = "character";
+    const companionModal = document.getElementById("companion-modal");
+    const companionBody = document.getElementById("companion-modal-body");
+    document.getElementById("companion-modal-close")?.addEventListener("click", closeCompanionEditor);
+    companionModal?.addEventListener("click", (e) => { if (e.target === companionModal) closeCompanionEditor(); });
+    document.getElementById("companion-save-btn")?.addEventListener("click", saveCompanionEditor);
+    document.getElementById("companion-delete-btn")?.addEventListener("click", deleteCompanionEditor);
 
-    document.querySelectorAll(".sidebar-tab").forEach((tab) => {
-        tab.addEventListener("click", () => {
-            rpTab = tab.getAttribute("data-rp-tab") || "worlds";
-            document.querySelectorAll(".sidebar-tab").forEach((t) => t.classList.toggle("active", t === tab));
-            renderSidebar();
-        });
-    });
+    function closeCompanionEditor() { companionModal?.classList.add("hidden"); }
+    function cval(id) { return (document.getElementById(id)?.value || "").trim(); }
 
-    const addCharacterBtn = document.getElementById("add-character-btn");
-    if (addCharacterBtn) addCharacterBtn.addEventListener("click", () => openCharacterEditor(null));
+    function openCompanionEditor(id) {
+        if (!window.BobigoCompanions || !companionModal || !companionBody) return;
+        const i18n = window.BobigoI18n; const lang = config.language || "vi";
+        const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
+        let c = companions.find((x) => x.id === id);
+        const isNew = !c;
+        if (!c) c = BobigoCompanions.newCompanion({ language: lang });
+        let knowledge = (c.knowledge || []).slice();
+        let avatar = c.avatar || null;
 
-    const rpUserName = document.getElementById("rp-user-name");
-    const rpUserDesc = document.getElementById("rp-user-desc");
-    if (rpUserName) {
-        rpUserName.addEventListener("input", () => {
-            const world = getActiveSession();
-            if (!world.userPersona) world.userPersona = { name: "", description: "" };
-            world.userPersona.name = rpUserName.value.trim();
-            saveSessions();
-        });
-    }
-    if (rpUserDesc) {
-        rpUserDesc.addEventListener("input", () => {
-            const world = getActiveSession();
-            if (!world.userPersona) world.userPersona = { name: "", description: "" };
-            world.userPersona.description = rpUserDesc.value.trim();
-            saveSessions();
-        });
-    }
-
-    const memoryAddBtn = document.getElementById("memory-add-btn");
-    const memoryInput = document.getElementById("memory-input");
-    if (memoryAddBtn && memoryInput) {
-        const pin = () => {
-            if (!window.BobigoRP) return;
-            BobigoRP.addMemory(getActiveSession(), memoryInput.value, "user");
-            memoryInput.value = "";
-            saveSessions();
-            renderMemoryList();
-        };
-        memoryAddBtn.addEventListener("click", pin);
-        memoryInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                pin();
-            }
-        });
-    }
-    const memoryClearBtn = document.getElementById("memory-clear-btn");
-    if (memoryClearBtn) {
-        memoryClearBtn.addEventListener("click", () => {
-            const i18n = window.BobigoI18n;
-            const lang = config.language || "vi";
-            const confirmMsg = (i18n && i18n.t(lang, "confirmClearMemory")) || "Xóa toàn bộ ký ức của kịch bản này?";
-            if (!confirm(confirmMsg)) return;
-            getActiveSession().memory = [];
-            getActiveSession().sceneLog = [];
-            saveSessions();
-            renderMemoryList();
-        });
-    }
-
-    const rpModal = document.getElementById("rp-modal");
-    const rpModalBody = document.getElementById("rp-modal-body");
-    const rpModalTitle = document.getElementById("rp-modal-title");
-    document.getElementById("rp-modal-close")?.addEventListener("click", closeRpModal);
-    document.getElementById("rp-edit-setting-btn")?.addEventListener("click", openSettingEditor);
-    rpModal?.addEventListener("click", (e) => {
-        if (e.target === rpModal) closeRpModal();
-    });
-    document.getElementById("rp-modal-save")?.addEventListener("click", saveRpModal);
-    document.getElementById("rp-modal-delete")?.addEventListener("click", deleteRpModalTarget);
-
-    function openCharacterEditor(charId) {
-        if (!window.BobigoRP) return;
-        rpModalMode = "character";
-        const world = getActiveSession();
-        const i18n = window.BobigoI18n;
-        const lang = world.language || config.language || "vi";
-        const isEn = lang === "en";
-        let ch = (world.characters || []).find((c) => c.id === charId);
-        if (!ch) {
-            ch = BobigoRP.newCharacter(null, lang);
-            world.characters = (world.characters || []).concat(ch);
-            saveSessions();
-        }
-        rpEditCharId = ch.id;
-        if (rpModalTitle) {
-            rpModalTitle.textContent = ch.name 
-                ? ((i18n && i18n.t(lang, "editChar")) || "Sửa nhân vật") 
-                : ((i18n && i18n.t(lang, "newChar")) || "Nhân vật mới");
-        }
-
-        const roles = isEn
-            ? ["companion", "npc", "rival", "narrator", "romantic interest", "mentor"]
-            : ["bạn đồng hành", "npc", "đối thủ", "người dẫn chuyện", "tình địch", "mentor"];
-
-        rpModalBody.innerHTML = `
+        const emojis = BobigoCompanions.EMOJIS.map((e) =>
+            `<button type="button" class="emoji-opt ${e === c.emoji ? "active" : ""}" data-emoji="${e}">${e}</button>`).join("");
+        document.getElementById("companion-modal-title").textContent = isNew ? t("newCompanion", "Companion mới") : t("editCompanion", "Sửa companion");
+        companionBody.innerHTML = `
             <div class="form-row">
-                <div class="config-group"><label>${(i18n && i18n.t(lang, "charName")) || "Tên"}</label><input id="f-name" value="${escapeHtml(ch.name)}"></div>
-                <div class="config-group"><label>${(i18n && i18n.t(lang, "charRole")) || "Vai trò"}</label>
-                    <select id="f-role">
-                        ${roles.map((r) =>
-                            `<option ${ch.role === r ? "selected" : ""}>${escapeHtml(r)}</option>`).join("")}
-                    </select>
-                </div>
-            </div>
-            <div class="form-row">
-                <div class="config-group"><label>${(i18n && i18n.t(lang, "charAge")) || "Tuổi"}</label><input id="f-age" value="${escapeHtml(ch.age)}"></div>
-                <div class="config-group"><label>${(i18n && i18n.t(lang, "charGender")) || "Giới tính"}</label><input id="f-gender" value="${escapeHtml(ch.gender)}"></div>
-            </div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charAppearance")) || "Ngoại hình"}</label><textarea id="f-appearance" rows="2">${escapeHtml(ch.appearance)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charPersonality")) || "Tính cách"}</label><textarea id="f-personality" rows="2">${escapeHtml(ch.personality)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charSpeech")) || "Cách nói chuyện"}</label><textarea id="f-speech" rows="2">${escapeHtml(ch.speech)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charGoals")) || "Mục tiêu / động cơ"}</label><textarea id="f-goals" rows="2">${escapeHtml(ch.goals)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charRelationships")) || "Quan hệ"}</label><textarea id="f-relationships" rows="2">${escapeHtml(ch.relationships)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charExampleLines")) || "Ví dụ thoại"}</label><textarea id="f-example" rows="2">${escapeHtml(ch.exampleLines)}</textarea></div>
-            <div class="config-group"><label>${(i18n && i18n.t(lang, "charNotes")) || "Ghi chú"}</label><textarea id="f-notes" rows="2">${escapeHtml(ch.notes)}</textarea></div>
-            <label class="config-toggle-row" style="padding:0;">
-                <span class="toggle-label">${(i18n && i18n.t(lang, "charPresent")) || "Có mặt trong cảnh"}</span>
-                <input type="checkbox" id="f-enabled" ${ch.enabled !== false ? "checked" : ""}>
-            </label>`;
-        rpModal.classList.remove("hidden");
-        document.getElementById("rp-modal-delete").style.display = "";
-    }
-
-    function openSettingEditor() {
-        const world = getActiveSession();
-        const s = (window.BobigoRP && BobigoRP.normalizeSetting(world.setting)) || {};
-        const lang = world.language || config.language || "vi";
-        const en = lang === "en";
-        rpModalMode = "setting";
-        rpEditCharId = null;
-        if (rpModalTitle) rpModalTitle.textContent = en ? "Scenario setting" : "Bối cảnh kịch bản";
-        const field = (id, label, hint, value, rows) => `
-            <div class="config-group">
-                <label>${label}</label>
-                ${rows > 1
-                    ? `<textarea id="${id}" rows="${rows}" placeholder="${hint}">${escapeHtml(value || "")}</textarea>`
-                    : `<input id="${id}" value="${escapeHtml(value || "")}" placeholder="${hint}">`}
-            </div>`;
-        rpModalBody.innerHTML = `
-            <div class="setting-section">
-                <h4>${en ? "Basics" : "Cơ bản"}</h4>
-                ${field("f-title", en ? "Title" : "Tiêu đề", "", world.title, 1)}
-                <div class="config-group">
-                    <label>${en ? "Play language" : "Ngôn ngữ chơi"}</label>
-                    <div class="lang-switch lang-switch-wide" id="f-world-lang">
-                        <button type="button" class="lang-btn ${lang === "vi" ? "active" : ""}" data-lang="vi">Tiếng Việt</button>
-                        <button type="button" class="lang-btn ${lang === "en" ? "active" : ""}" data-lang="en">English</button>
+                <div class="config-group" style="flex:0 0 auto">
+                    <label>${t("companionAvatar", "Ảnh / biểu tượng")}</label>
+                    <div class="avatar-edit">
+                        <div class="avatar-preview" id="c-avatar-preview">${companionAvatarHTML({ avatar, emoji: c.emoji })}</div>
+                        <button type="button" class="btn-icon-sm" id="c-avatar-btn" title="${t("uploadImage", "Tải ảnh")}"><i class="fa-solid fa-image"></i></button>
+                        <button type="button" class="btn-icon-sm" id="c-avatar-clear" title="${t("useEmoji", "Dùng emoji")}"><i class="fa-solid fa-rotate-left"></i></button>
+                        <input type="file" id="c-avatar-file" accept="image/*" style="display:none">
                     </div>
                 </div>
-                ${field("f-genre", en ? "Genre" : "Thể loại", en ? "Fantasy, noir, slice of life…" : "Fantasy, noir, đời thường…", s.genre, 1)}
-                ${field("f-era", en ? "Era / period" : "Thời đại", en ? "Late 1920s, far future…" : "Cuối 1920, tương lai xa…", s.era, 1)}
+                <div class="config-group" style="flex:1"><label>${t("companionName", "Tên")}</label><input id="c-name" value="${escapeHtml(c.name || "")}"></div>
             </div>
-            <div class="setting-section">
-                <h4>${en ? "World" : "Thế giới"}</h4>
-                ${field("f-world", en ? "World overview" : "Tổng quan thế giới", en ? "How this world works" : "Thế giới này vận hành ra sao", s.world, 3)}
-                ${field("f-location", en ? "Current location" : "Địa điểm hiện tại", en ? "Harbor tavern, office…" : "Quán rượu cảng, văn phòng…", s.location, 2)}
-                ${field("f-lore", en ? "History / lore" : "Lịch sử / lore", "", s.lore, 3)}
-                ${field("f-factions", en ? "Factions / society" : "Phe phái / xã hội", "", s.factions, 2)}
-            </div>
-            <div class="setting-section">
-                <h4>${en ? "This scene" : "Cảnh này"}</h4>
-                ${field("f-atmosphere", en ? "Atmosphere / tone" : "Không khí / tông", en ? "Wet, tense, tender…" : "Ẩm, căng, dịu…", s.atmosphere, 2)}
-                ${field("f-timeWeather", en ? "Time & weather" : "Thời gian & thời tiết", "", s.timeWeather, 1)}
-                ${field("f-sensory", en ? "Sensory details" : "Chi tiết giác quan", en ? "Sights, sounds, smells" : "Nhìn, nghe, mùi", s.sensory, 2)}
-                ${field("f-conflict", en ? "Conflict / stakes" : "Xung đột / stakes", "", s.conflict, 2)}
-            </div>
-            <div class="setting-section">
-                <h4>${en ? "Rules" : "Luật"}</h4>
-                ${field("f-power", en ? "Magic / tech rules" : "Luật phép / công nghệ", "", s.powerRules, 2)}
-                ${field("f-taboos", en ? "Content limits" : "Giới hạn nội dung", "", s.taboos, 2)}
-                ${field("f-rules", en ? "RP rules" : "Quy tắc RP", en ? "Stay in character. Honor OOC." : "Ở trong nhân vật. Tôn trọng OOC.", world.rules, 3)}
+            <div class="config-group"><label>${t("companionEmoji", "Emoji (khi không có ảnh)")}</label><div class="emoji-grid" id="c-emoji">${emojis}</div></div>
+            <div class="config-group"><label>${t("companionTagline", "Mô tả ngắn")}</label><input id="c-tagline" value="${escapeHtml(c.tagline || "")}"></div>
+            <div class="config-group"><label>${t("companionPersona", "Tính cách")}</label><textarea id="c-persona" rows="3">${escapeHtml(c.persona || "")}</textarea></div>
+            <div class="config-group"><label>${t("companionInstructions", "Hướng dẫn / vai trò")}</label><textarea id="c-instructions" rows="3">${escapeHtml(c.instructions || "")}</textarea></div>
+            <div class="config-group">
+                <label>${t("companionKnowledge", "Kiến thức")}</label>
+                <div class="kn-list" id="c-knowledge"></div>
+                <div class="kn-add">
+                    <input id="c-kn-note" placeholder="${t("knowledgeNotePh", "Dán ghi chú / dữ kiện…")}">
+                    <button type="button" class="btn-icon-sm" id="c-kn-add-btn" title="${t("addNote", "Thêm ghi chú")}"><i class="fa-solid fa-plus"></i></button>
+                    <button type="button" class="btn-icon-sm" id="c-kn-file-btn" title="${t("uploadFile", "Tải tệp")}"><i class="fa-solid fa-paperclip"></i></button>
+                    <input type="file" id="c-kn-file" accept=".pdf,.txt,.md,.json,.csv,.py,.js,.html,.css" style="display:none">
+                </div>
             </div>`;
-        rpModal.classList.remove("hidden");
-        document.getElementById("rp-modal-delete").style.display = "none";
-        document.querySelectorAll("#f-world-lang .lang-btn").forEach((btn) => {
-            btn.addEventListener("click", () => {
-                document.querySelectorAll("#f-world-lang .lang-btn").forEach((b) => b.classList.toggle("active", b === btn));
-            });
+
+        companionBody.querySelectorAll(".emoji-opt").forEach((b) => b.addEventListener("click", () => {
+            companionBody.querySelectorAll(".emoji-opt").forEach((x) => x.classList.remove("active"));
+            b.classList.add("active");
+        }));
+
+        function refreshAvatarPreview() {
+            const pv = document.getElementById("c-avatar-preview");
+            const em = companionBody.querySelector(".emoji-opt.active");
+            if (pv) pv.innerHTML = companionAvatarHTML({ avatar, emoji: em ? em.getAttribute("data-emoji") : c.emoji });
+        }
+        document.getElementById("c-avatar-btn").addEventListener("click", () => document.getElementById("c-avatar-file").click());
+        document.getElementById("c-avatar-clear").addEventListener("click", () => { avatar = null; refreshAvatarPreview(); });
+        document.getElementById("c-avatar-file").addEventListener("change", async (e) => {
+            const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
+            try { avatar = await resizeImageToDataURL(f); refreshAvatarPreview(); }
+            catch (err) { alert(t("knowledgeFail", "Lỗi đọc tệp: ") + (err.message || err)); }
         });
-    }
 
-    function closeRpModal() {
-        rpModal?.classList.add("hidden");
-    }
-
-    function val(id) {
-        return (document.getElementById(id)?.value || "").trim();
-    }
-
-    function saveRpModal() {
-        const world = getActiveSession();
-        if (rpModalMode === "setting") {
-            world.title = val("f-title") || (config.language === "en" ? "New scenario" : "Kịch bản mới");
-            world.language = document.querySelector("#f-world-lang .lang-btn.active")?.getAttribute("data-lang") || world.language || "vi";
-            world.rules = val("f-rules");
-            world.setting = {
-                genre: val("f-genre"),
-                era: val("f-era"),
-                world: val("f-world"),
-                location: val("f-location"),
-                atmosphere: val("f-atmosphere"),
-                factions: val("f-factions"),
-                lore: val("f-lore"),
-                powerRules: val("f-power"),
-                conflict: val("f-conflict"),
-                timeWeather: val("f-timeWeather"),
-                sensory: val("f-sensory"),
-                taboos: val("f-taboos"),
-            };
-        } else {
-            const ch = (world.characters || []).find((c) => c.id === rpEditCharId);
-            if (ch) {
-                ch.name = val("f-name");
-                ch.role = val("f-role");
-                ch.age = val("f-age");
-                ch.gender = val("f-gender");
-                ch.appearance = val("f-appearance");
-                ch.personality = val("f-personality");
-                ch.speech = val("f-speech");
-                ch.goals = val("f-goals");
-                ch.relationships = val("f-relationships");
-                ch.exampleLines = val("f-example");
-                ch.notes = val("f-notes");
-                ch.enabled = !!document.getElementById("f-enabled")?.checked;
-            }
+        function renderKn() {
+            const el = document.getElementById("c-knowledge");
+            el.innerHTML = knowledge.length
+                ? knowledge.map((k) => `<div class="kn-item" data-kn="${k.id}"><span class="kn-name">${escapeHtml(k.name || "note")}</span><span class="kn-size">${(k.text || "").length} ch</span><button type="button" class="kn-del"><i class="fa-solid fa-xmark"></i></button></div>`).join("")
+                : `<div class="kn-empty">${t("noKnowledge", "Chưa có. Thêm ghi chú hoặc tải tệp.")}</div>`;
+            el.querySelectorAll(".kn-item").forEach((row) => row.querySelector(".kn-del").addEventListener("click", () => {
+                knowledge = knowledge.filter((k) => k.id !== row.getAttribute("data-kn")); renderKn();
+            }));
         }
-        saveSessions();
-        closeRpModal();
-        renderSidebar();
-        syncRpSceneBar();
-    }
+        renderKn();
 
-    function deleteRpModalTarget() {
-        if (rpModalMode !== "character" || !rpEditCharId) return;
-        const world = getActiveSession();
-        world.characters = (world.characters || []).filter((c) => c.id !== rpEditCharId);
-        saveSessions();
-        closeRpModal();
-        renderCastList();
-    }
-
-    const genModal = document.getElementById("rp-generate-modal");
-    const genPreview = document.getElementById("rp-generate-preview");
-    const genRun = document.getElementById("rp-generate-run");
-    const genApply = document.getElementById("rp-generate-apply");
-    const genBrief = document.getElementById("rp-brief-input");
-    let pendingDraft = null;
-
-    function openGenerateModal() {
-        pendingDraft = null;
-        if (genBrief) genBrief.value = "";
-        if (genPreview) {
-            genPreview.textContent = "";
-            genPreview.classList.add("hidden");
-        }
-        genApply?.classList.add("hidden");
-        genRun?.classList.remove("hidden");
-        genModal?.classList.remove("hidden");
-        if (window.BobigoI18n) BobigoI18n.apply(config.language);
-    }
-
-    document.getElementById("rp-generate-btn")?.addEventListener("click", openGenerateModal);
-    document.getElementById("rp-generate-close")?.addEventListener("click", () => genModal?.classList.add("hidden"));
-    genModal?.addEventListener("click", (e) => {
-        if (e.target === genModal) genModal.classList.add("hidden");
-    });
-
-    genRun?.addEventListener("click", async () => {
-        const brief = (genBrief?.value || "").trim();
-        if (!brief || !llmReady) return;
-        const i18n = window.BobigoI18n;
-        genRun.disabled = true;
-        genRun.textContent = i18n ? i18n.t(config.language, "generateBusy") : "…";
-        try {
-            const res = await fetch("/api/roleplay/expand", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ brief, language: config.language }),
-            });
-            if (!res.ok) throw new Error(await res.text());
-            pendingDraft = await res.json();
-            if (genPreview) {
-                genPreview.classList.remove("hidden");
-                genPreview.textContent = JSON.stringify(pendingDraft, null, 2);
-            }
-            genApply?.classList.remove("hidden");
-        } catch (err) {
-            alert(err.message || String(err));
-        } finally {
-            genRun.disabled = false;
-            if (i18n) genRun.textContent = i18n.t(config.language, "generateGo");
-        }
-    });
-
-    genApply?.addEventListener("click", () => {
-        if (!pendingDraft || !window.BobigoRP) return;
-        const world = BobigoRP.worldFromDraft(pendingDraft, config.language);
-        worlds.unshift(world);
-        currentWorldId = world.id;
-        BobigoRP.saveWorlds(worlds);
-        genModal?.classList.add("hidden");
-        setMode("roleplay");
-        setNavActive(railRpBtn);
-        rpTab = "cast";
-        document.querySelectorAll(".sidebar-tab").forEach((t) => {
-            t.classList.toggle("active", t.getAttribute("data-rp-tab") === "cast");
+        document.getElementById("c-kn-add-btn").addEventListener("click", () => {
+            const txt = cval("c-kn-note"); if (!txt) return;
+            knowledge.push({ id: BobigoCompanions.uid("kn"), name: txt.slice(0, 24) + (txt.length > 24 ? "…" : ""), text: txt, source: "note" });
+            document.getElementById("c-kn-note").value = ""; renderKn();
         });
+        document.getElementById("c-kn-file-btn").addEventListener("click", () => document.getElementById("c-kn-file").click());
+        document.getElementById("c-kn-file").addEventListener("change", async (e) => {
+            const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
+            try {
+                const fd = new FormData(); fd.append("file", f);
+                const resp = await fetch("/api/extract-file", { method: "POST", body: fd });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || "extract failed");
+                knowledge.push({ id: BobigoCompanions.uid("kn"), name: f.name, text: data.text || "", source: "file" });
+                renderKn();
+            } catch (err) { alert(t("knowledgeFail", "Lỗi đọc tệp: ") + (err.message || err)); }
+        });
+
+        companionModal._draft = { c, isNew, getKnowledge: () => knowledge, getAvatar: () => avatar };
+        companionModal.classList.remove("hidden");
+        const delBtn = document.getElementById("companion-delete-btn");
+        if (delBtn) delBtn.style.display = isNew ? "none" : "";
+    }
+
+    function saveCompanionEditor() {
+        if (!companionModal || !companionModal._draft) return;
+        const { c, isNew, getKnowledge, getAvatar } = companionModal._draft;
+        c.name = cval("c-name") || (config.language === "en" ? "Companion" : "Bạn đồng hành");
+        const activeEmoji = companionBody.querySelector(".emoji-opt.active");
+        if (activeEmoji) c.emoji = activeEmoji.getAttribute("data-emoji");
+        c.avatar = getAvatar();
+        c.tagline = cval("c-tagline");
+        c.persona = cval("c-persona");
+        c.instructions = cval("c-instructions");
+        c.knowledge = getKnowledge();
+        c.language = config.language;
+        if (isNew) { companions.unshift(c); currentCompanionId = c.id; }
+        saveSessions();
+        closeCompanionEditor();
+        if (appMode !== "companion") { setMode("companion"); setNavActive(railCompanionsBtn); }
         renderSidebar();
-        openSettingEditor();
-    });
+        renderCurrentSession();
+        setModeLabel();
+    }
+
+    function deleteCompanionEditor() {
+        if (!companionModal || !companionModal._draft) return;
+        const { c } = companionModal._draft;
+        companions = companions.filter((x) => x.id !== c.id);
+        if (currentCompanionId === c.id) currentCompanionId = companions.length ? companions[0].id : null;
+        saveSessions();
+        closeCompanionEditor();
+        renderSidebar();
+        renderCurrentSession();
+        setModeLabel();
+    }
 });

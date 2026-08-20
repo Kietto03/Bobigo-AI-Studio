@@ -30,8 +30,16 @@
                 <button class="rail-btn active" id="rail-chat-btn" data-i18n-title="chat" title="Chat">
                     <i class="fa-solid fa-message"></i>
                 </button>
-                <button class="rail-btn" id="rail-rp-btn" data-i18n-title="roleplay" title="Roleplay">
-                    <i class="fa-solid fa-masks-theater"></i>
+                <button class="rail-btn" id="rail-companions-btn" data-i18n-title="companions" title="Companions">
+                    <i class="fa-solid fa-users"></i>
+                </button>
+                <button class="rail-btn" id="rail-projects-btn" data-i18n-title="projects" title="Projects">
+                    <i class="fa-solid fa-folder-open"></i>
+                </button>
+            </div>
+            <div class="rail-bottom">
+                <button class="rail-btn" id="open-settings-btn" data-i18n-title="config" title="Cài đặt">
+                    <i class="fa-solid fa-gear"></i>
                 </button>
             </div>
         </nav>
@@ -40,42 +48,17 @@
         <aside class="history-panel" id="history-panel">
             <div class="panel-header">
                 <h3 id="sidebar-title" data-i18n="conversations">Cuộc trò chuyện</h3>
-                <button class="btn-icon-sm" id="new-chat-btn" data-i18n-title="newItem" title="Tạo mới">
-                    <i class="fa-solid fa-plus"></i>
-                </button>
-            </div>
-            <div class="sidebar-tabs hidden" id="rp-tabs">
-                <button class="sidebar-tab active" data-rp-tab="worlds" data-i18n="tabWorlds">Kịch bản</button>
-                <button class="sidebar-tab" data-rp-tab="cast" data-i18n="tabCast">Nhân vật</button>
-                <button class="sidebar-tab" data-rp-tab="memory" data-i18n="tabMemory">Ký ức</button>
+                <div class="panel-header-actions">
+                    <button class="btn-icon-sm sidebar-compact-trigger" id="sidebar-compact-btn" data-i18n-title="collapseSidebar" title="Thu gọn">
+                        <i class="fa-solid fa-chevron-left"></i>
+                    </button>
+                </div>
             </div>
             <div class="history-search" id="history-search-wrap">
                 <i class="fa-solid fa-magnifying-glass search-icon"></i>
                 <input type="text" id="history-search-input" data-i18n-placeholder="searchChats" placeholder="Tìm kiếm cuộc trò chuyện...">
             </div>
             <div class="history-list" id="history-list"></div>
-            <div class="rp-pane hidden" id="rp-cast-pane">
-                <button class="btn-glass" id="add-character-btn" type="button">
-                    <i class="fa-solid fa-user-plus"></i> <span data-i18n="addChar">Thêm nhân vật</span>
-                </button>
-                <div class="cast-list" id="cast-list"></div>
-                <div class="config-group" style="margin-top:12px;">
-                    <label for="rp-user-name" data-i18n="youPlay">Bạn vào vai</label>
-                    <input type="text" id="rp-user-name" class="config-text-input" data-i18n-placeholder="yourName" placeholder="Tên người chơi">
-                    <textarea id="rp-user-desc" rows="2" data-i18n-placeholder="yourDesc" placeholder="Mô tả persona của bạn…"></textarea>
-                </div>
-            </div>
-            <div class="rp-pane hidden" id="rp-memory-pane">
-                <p class="rp-hint" data-i18n="memHint">Ký ức chỉ thuộc kịch bản này. AI được nhắc không quên các mục dưới.</p>
-                <div class="memory-list" id="memory-list"></div>
-                <div class="memory-add">
-                    <input type="text" id="memory-input" data-i18n-placeholder="memPh" placeholder="Thêm sự kiện / đặc điểm…">
-                    <button type="button" class="btn-icon-sm" id="memory-add-btn" title="Ghim ký ức">
-                        <i class="fa-solid fa-plus"></i>
-                    </button>
-                </div>
-                <button type="button" class="btn-text-danger" id="memory-clear-btn" data-i18n="memClear">Xóa ký ức phiên</button>
-            </div>
             <div class="panel-footer" id="sidebar-footer">
                 <button class="btn-text-danger" id="clear-all-history-btn">
                     <i class="fa-regular fa-trash-can"></i> <span data-i18n="clearHistory">Xóa toàn bộ lịch sử</span>
@@ -85,22 +68,20 @@
 
         <!-- 3. Main Chat Viewport -->
         <main class="chat-viewport">
+            <!-- Background Crimson Ambient Glow -->
+            <div class="ambient-glow"></div>
+
             <!-- Agent Topbar -->
             <header class="topbar">
                 <div class="topbar-left">
                     <button class="btn-icon-mobile" id="mobile-toggle" data-i18n-title="toggleSidebar" title="Đóng/mở danh sách">
                         <i class="fa-solid fa-bars"></i>
                     </button>
-                    <!-- Agent selector & badge -->
-                    <div class="model-selector-pill" id="model-pill" title="Trạng thái mô hình">
-                        <img src="logo.png" alt="Bobigo" class="pill-avatar">
-                        <div class="pill-text">
-                            <span class="model-name" id="model-name-label">Bobigo 35B</span>
-                            <span class="status-label" id="status-label">Đang kiểm tra…</span>
-                        </div>
-                        <div class="status-dot loading" id="status-dot" aria-hidden="true"></div>
-                        <span class="engine-badge">Local</span>
-                    </div>
+                    <!-- Current conversation title + dropdown -->
+                    <button class="convo-title-btn" id="convo-title-btn" title="Tùy chọn hội thoại">
+                        <span class="convo-title" id="convo-title">Cuộc trò chuyện</span>
+                        <i class="fa-solid fa-chevron-down convo-caret"></i>
+                    </button>
                 </div>
 
                 <div class="topbar-right">
@@ -116,14 +97,11 @@
                         <div class="dropdown-menu" id="export-menu">
                             <button class="dropdown-item" id="export-md-btn"><i class="fa-regular fa-file-lines"></i> <span data-i18n="exportMd">Xuất Markdown (.md)</span></button>
                             <button class="dropdown-item" id="export-json-btn"><i class="fa-regular fa-file-code"></i> <span data-i18n="exportJson">Xuất JSON (.json)</span></button>
-                            <button class="dropdown-item" id="export-story-btn"><i class="fa-solid fa-book"></i> <span data-i18n="exportStory">Xuất câu chuyện (.md)</span></button>
-                            <button class="dropdown-item" id="import-story-btn"><i class="fa-solid fa-file-import"></i> <span data-i18n="importStory">Nhập câu chuyện…</span></button>
                         </div>
                     </div>
-                    <input type="file" id="import-story-input" accept=".json,.md,.txt" style="display:none">
-                    <!-- Toggle Settings Modal -->
-                    <button class="btn-icon-sm" id="topbar-config-btn" data-i18n-title="config" title="Cài đặt">
-                        <i class="fa-solid fa-gear"></i>
+                    <!-- Quick Toggle Config Drawer -->
+                    <button class="btn-icon-sm" id="topbar-config-btn" title="Bật/Tắt cấu hình nhanh">
+                        <i class="fa-solid fa-sliders"></i>
                     </button>
                 </div>
             </header>
@@ -176,15 +154,6 @@
 
             <!-- Chat Input Wrapper -->
             <div class="chat-input-wrapper">
-                <div class="rp-scene-bar hidden" id="rp-scene-bar">
-                    <button type="button" class="btn-glass-sm" id="rp-generate-btn" title="Create from a brief">
-                        <i class="fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="generate">Tạo từ mô tả</span>
-                    </button>
-                    <button type="button" class="btn-glass-sm" id="rp-edit-setting-btn" title="Bối cảnh & quy tắc">
-                        <i class="fa-solid fa-scroll"></i> <span data-i18n="scene">Bối cảnh</span>
-                    </button>
-                    <span class="rp-scene-title" id="rp-scene-title">Kịch bản mới</span>
-                </div>
                 <div class="attachment-preview-bar hidden" id="attachment-preview-bar"></div>
                 <div class="chat-input-box glass">
                     <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp văn bản / PDF">
@@ -241,8 +210,8 @@
                             <div class="setting-row">
                                 <div class="setting-info"><span class="setting-label" data-i18n="lang">Ngôn ngữ</span><span class="setting-sub" data-i18n="langHint">Đổi toàn bộ giao diện và ngôn ngữ trả lời.</span></div>
                                 <div class="lang-switch" id="lang-switch-config">
-                                    <button type="button" class="lang-btn" data-lang="vi">Tiếng Việt</button>
-                                    <button type="button" class="lang-btn" data-lang="en">English</button>
+                                    <button type="button" class="lang-btn" data-lang="vi">VI</button>
+                                    <button type="button" class="lang-btn" data-lang="en">EN</button>
                                 </div>
                             </div>
                             <div class="setting-row">
@@ -262,13 +231,34 @@
                                 <button type="button" class="theme-swatch" data-theme="amethyst"><span class="ts-prev" style="background:#0e0b14"><span class="ts-side" style="background:#100c17"></span><span class="ts-main"><span class="ts-bar" style="background:#b06bff"></span><span class="ts-bar ts-bar2" style="background:#271f33"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#b06bff"></span>Amethyst</span></button>
                                 <button type="button" class="theme-swatch" data-theme="porcelain"><span class="ts-prev" style="background:#eef0f4"><span class="ts-side" style="background:#e6e9ef"></span><span class="ts-main"><span class="ts-bar" style="background:#2f6bff"></span><span class="ts-bar ts-bar2" style="background:#d3d7df"></span></span></span><span class="ts-nm"><span class="ts-chip" style="background:#2f6bff"></span>Porcelain</span></button>
                             </div>
+
+                            <div class="settings-sec" data-i18n="style">Style</div>
+                            <p class="settings-desc" data-i18n="styleHint">Đổi hình khối &amp; kiểu chữ của toàn giao diện.</p>
+                            <div class="style-grid" id="style-grid">
+                                <button type="button" class="style-swatch sw-modern" data-style="modern">
+                                    <span class="sw-demo"><span class="sw-chip"></span><span class="sw-line"></span></span>
+                                    <span class="sw-name" data-i18n="styleModern">Modern</span>
+                                </button>
+                                <button type="button" class="style-swatch sw-pixel" data-style="pixel">
+                                    <span class="sw-demo"><span class="sw-chip"></span><span class="sw-line"></span></span>
+                                    <span class="sw-name">Pixel</span>
+                                </button>
+                            </div>
                         </section>
 
                         <section class="settings-panel" data-settings-panel="model">
                             <h3 class="settings-h" data-i18n="setModel">Mô hình</h3>
                             <div class="health-card" id="health-card">
-                                <div class="health-card-title" data-i18n="engine">Engine</div>
-                                <div class="health-card-line" id="health-card-line">Đang kiểm tra llama-server…</div>
+                                <div class="health-row">
+                                    <span class="health-dot loading" id="health-dot"></span>
+                                    <span class="health-status" id="health-status">Đang kiểm tra…</span>
+                                    <span class="engine-badge" data-i18n="engineBadge">Local · llama-server</span>
+                                </div>
+                                <div class="health-line"><span data-i18n="modelLabel">Model</span><span class="health-val" id="health-model">—</span></div>
+                                <div class="health-line"><span data-i18n="speedLabel">Tốc độ nhả token</span><span class="health-val" id="health-speed">—</span></div>
+                                <div class="health-line"><span data-i18n="latencyLabel">Độ trễ kết nối</span><span class="health-val" id="health-latency">—</span></div>
+                                <div class="health-line"><span data-i18n="jinjaLabel">Tool calling (jinja)</span><span class="health-val" id="health-jinja">—</span></div>
+                                <div class="health-line"><span data-i18n="ctxLabel">Context window</span><span class="health-val" id="health-ctx">—</span></div>
                             </div>
                             <div class="config-group">
                                 <label for="system-prompt-input" data-i18n="systemPrompt">System prompt</label>
@@ -346,41 +336,39 @@
         </div>
     </div>
 
-    <!-- Character / setting editor -->
-    <div class="modal-backdrop hidden" id="rp-modal" role="dialog" aria-modal="true">
+    <!-- Companion editor -->
+    <div class="modal-backdrop hidden" id="companion-modal" role="dialog" aria-modal="true">
         <div class="modal-card">
             <div class="modal-header">
-                <h3 id="rp-modal-title">Nhân vật</h3>
-                <button type="button" class="btn-icon-sm" id="rp-modal-close"><i class="fa-solid fa-xmark"></i></button>
+                <h3 id="companion-modal-title" data-i18n="editCompanion">Companion</h3>
+                <button type="button" class="btn-icon-sm" id="companion-modal-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
-            <div class="modal-body" id="rp-modal-body"></div>
+            <div class="modal-body" id="companion-modal-body"></div>
             <div class="modal-footer">
-                <button type="button" class="btn-glass" id="rp-modal-delete" data-i18n="del">Xóa</button>
-                <button type="button" class="btn-primary" id="rp-modal-save" data-i18n="save">Lưu</button>
+                <button type="button" class="btn-glass" id="companion-delete-btn" data-i18n="del">Xóa</button>
+                <button type="button" class="btn-primary" id="companion-save-btn" data-i18n="save">Lưu</button>
             </div>
         </div>
     </div>
 
-    <div class="modal-backdrop hidden" id="rp-generate-modal" role="dialog" aria-modal="true">
+    <!-- Project editor -->
+    <div class="modal-backdrop hidden" id="project-modal" role="dialog" aria-modal="true">
         <div class="modal-card">
             <div class="modal-header">
-                <h3 data-i18n="generateTitle">Tạo chuyện mới</h3>
-                <button type="button" class="btn-icon-sm" id="rp-generate-close"><i class="fa-solid fa-xmark"></i></button>
+                <h3 id="project-modal-title" data-i18n="editProject">Dự án</h3>
+                <button type="button" class="btn-icon-sm" id="project-modal-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
-            <div class="modal-body">
-                <p class="rp-hint" data-i18n="generateHint">Mô tả nhân vật, bối cảnh, thể loại. Bobigo điền hồ sơ — bạn chỉnh lại sau.</p>
-                <textarea id="rp-brief-input" rows="6" data-i18n-placeholder="generatePh" placeholder="Mô tả chuyện…"></textarea>
-                <pre class="generate-preview hidden" id="rp-generate-preview"></pre>
-            </div>
+            <div class="modal-body" id="project-modal-body"></div>
             <div class="modal-footer">
-                <button type="button" class="btn-primary" id="rp-generate-run" data-i18n="generateGo">Để Bobigo điền</button>
-                <button type="button" class="btn-primary hidden" id="rp-generate-apply" data-i18n="applyWorld">Tạo session và chỉnh</button>
+                <button type="button" class="btn-glass" id="project-delete-btn" data-i18n="del">Xóa</button>
+                <button type="button" class="btn-primary" id="project-save-btn" data-i18n="save">Lưu</button>
             </div>
         </div>
     </div>
 
     <script src="i18n.js" defer></script>
-    <script src="roleplay.js" defer></script>
+    <script src="companions.js" defer></script>
+    <script src="projects.js" defer></script>
     <script type="module" src="js/main.js"></script>
 </body>
 </html>

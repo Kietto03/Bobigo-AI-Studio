@@ -27,7 +27,6 @@ from backend.config import (
     MAX_AGENT_ITERATIONS,
     REPLY_RESERVE,
 )
-from backend.roleplay import build_roleplay_system
 from backend.tools import execute_tool, tool_schemas
 
 TOOL_HINT = (
@@ -65,19 +64,9 @@ def content_chunk(content: str = "", reasoning: str = "", tool_events: list[dict
 def prepare_messages(
     messages: list[dict[str, Any]],
     *,
-    mode: str = "chat",
-    roleplay: dict[str, Any] | None = None,
     agent_tools: bool = True,
 ) -> list[dict[str, Any]]:
     prepared = [dict(m) for m in messages if m.get("role") != "system"]
-    if mode == "roleplay" and roleplay:
-        system = build_roleplay_system(roleplay)
-        if agent_tools:
-            rp_lang = str(roleplay.get("language") or "vi").lower()
-            system = system + "\n\n" + (TOOL_HINT_EN if rp_lang.startswith("en") else TOOL_HINT)
-        prepared.insert(0, {"role": "system", "content": system})
-        return prepared
-
     existing_sys = next((dict(m) for m in messages if m.get("role") == "system"), None)
     if existing_sys is None:
         prepared.insert(0, {"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
@@ -160,8 +149,6 @@ async def stream_agent(
     agent_tools = body.get("agent_tools", True) is not False
     messages = prepare_messages(
         list(body.get("messages") or []),
-        mode=str(body.get("mode") or "chat"),
-        roleplay=body.get("roleplay") if isinstance(body.get("roleplay"), dict) else None,
         agent_tools=agent_tools,
     )
     model = body.get("model") or DEFAULT_MODEL

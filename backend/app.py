@@ -14,7 +14,6 @@ from fastapi.staticfiles import StaticFiles
 from backend.agent.compress import summarize_messages
 from backend.agent.loop import stream_agent
 from backend.config import HOST, LLM_BASE_URL, LLM_TIMEOUT, PORT, WEB_DIR
-from backend.expand import expand_world
 from backend.health import probe_llm
 from backend.mcp import MCPManager
 from backend.tools import SCHEMAS
@@ -183,25 +182,6 @@ async def extract_file(request: Request):
         return JSONResponse({"error": f"Lỗi xử lý tệp: {exc}"}, status_code=500)
 
 
-@app.post("/api/roleplay/expand")
-async def roleplay_expand(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    brief = (data.get("brief") or "").strip()
-    if not brief:
-        return JSONResponse({"error": "Missing brief"}, status_code=400)
-    language = data.get("language") or "vi"
-    try:
-        world = await expand_world(brief, language, request.app.state.http)
-    except httpx.HTTPError as exc:
-        return JSONResponse({"error": f"LLM error: {exc}"}, status_code=502)
-    except ValueError as exc:
-        return JSONResponse({"error": f"Parse error: {exc}"}, status_code=502)
-    return world
-
-
 @app.post("/api/compress")
 async def compress_conversation(request: Request):
     try:
@@ -236,7 +216,7 @@ async def chat_completions(request: Request):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
     agent_tools = body.pop("agent_tools", True)
-    if agent_tools is False and body.get("mode") != "roleplay":
+    if agent_tools is False:
         # Re-wrap body without the extra field for a transparent proxy
         async def _raw_proxy():
             client: httpx.AsyncClient = request.app.state.http
