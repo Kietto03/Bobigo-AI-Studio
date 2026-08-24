@@ -1,0 +1,28 @@
+# PostgreSQL for Bobigo AI Studio.
+# Only the database runs in Docker — the FastAPI backend stays on the host so it
+# can reach the local llama-server (Metal GPU) and MCP servers.
+#   docker compose up -d db      # start
+#   docker compose stop db       # stop (data kept in the named volume)
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bobigo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bobigo
+      POSTGRES_PASSWORD: bobigo
+      POSTGRES_DB: bobigo
+    ports:
+      # Bind to loopback only — not reachable from the LAN.
+      # Host port 5433 (5432 is often taken by another local Postgres).
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - bobigo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bobigo -d bobigo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  bobigo_pgdata:

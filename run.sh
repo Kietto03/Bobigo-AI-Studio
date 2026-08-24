@@ -31,6 +31,23 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
+# 0. Start PostgreSQL (Docker) — the app's data store
+if command -v docker >/dev/null 2>&1; then
+    echo "🐘 Starting PostgreSQL via Docker Compose..."
+    docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d db >/dev/null 2>&1
+    echo -n "⏳ Waiting for PostgreSQL..."
+    for i in {1..40}; do
+        if docker compose -f "$PROJECT_DIR/docker-compose.yml" exec -T db pg_isready -U bobigo -d bobigo >/dev/null 2>&1; then
+            echo -e "\n✅ PostgreSQL ready."
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+else
+    echo "⚠️  Docker không có sẵn — bỏ qua Postgres. App sẽ chạy chế độ offline (IndexedDB cục bộ)."
+fi
+
 # 1. Start llama-server backend if not already running on port 11434
 if ! lsof -i:11434 >/dev/null 2>&1; then
     echo "⚙️ Starting llama-server on port 11434 (Metal + --jinja)..."

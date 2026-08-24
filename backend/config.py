@@ -14,6 +14,11 @@ PORT = int(os.environ.get("PORT", "8000"))
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434")
 LLM_TIMEOUT = 300  # seconds — long timeout for slow generation
 
+# Database (PostgreSQL via Docker — see docker-compose.yml)
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://bobigo:bobigo@127.0.0.1:5433/bobigo"
+)
+
 # Agent defaults
 DEFAULT_MODEL = "qwen35b-uncensored"
 DEFAULT_SYSTEM_PROMPT = (

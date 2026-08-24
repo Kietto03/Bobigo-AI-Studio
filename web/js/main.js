@@ -12,7 +12,10 @@ import { initContextMeter } from "./features/contextMeter.js";
 import { initMessageSearch } from "./features/messageSearch.js";
 import { loadPresets, savePresets, attachSlashCommands } from "./features/promptLibrary.js";
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+    // Wait for the IndexedDB-backed store to open + migrate legacy localStorage
+    // data before we read any sessions/companions synchronously below.
+    if (window.BobigoDB) await window.BobigoDB.ready;
     // --------------------------------------------------------------------------
     // DOM Elements
     // --------------------------------------------------------------------------
@@ -950,10 +953,18 @@ document.addEventListener("DOMContentLoaded", () => {
     // --------------------------------------------------------------------------
     function loadSessions() {
         try {
-            return JSON.parse(localStorage.getItem("bobigo_sessions")) || [];
+            const raw = window.BobigoDB
+                ? window.BobigoDB.getSync("bobigo_sessions")
+                : JSON.parse(localStorage.getItem("bobigo_sessions"));
+            return Array.isArray(raw) ? raw : [];
         } catch (e) {
             return [];
         }
+    }
+
+    function persistSessions() {
+        if (window.BobigoDB) window.BobigoDB.set("bobigo_sessions", sessions);
+        else localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
     }
 
     function saveSessions() {
@@ -961,7 +972,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (window.BobigoCompanions) BobigoCompanions.saveCompanions(companions);
             return;
         }
-        localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+        persistSessions();
     }
 
     function initSessions() {
@@ -1260,7 +1271,7 @@ document.addEventListener("DOMContentLoaded", () => {
         };
         sessions.unshift(s);
         currentSessionId = s.id;
-        localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+        persistSessions();
         renderSidebar();
         renderCurrentSession();
         if (isMobile()) closeAllDrawers();
@@ -1318,7 +1329,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     const rest = sessions.filter((s) => s.projectId === p.id);
                     currentSessionId = rest.length ? rest[0].id : null;
                 }
-                localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+                persistSessions();
                 renderSidebar(); renderCurrentSession();
             });
             historyList.appendChild(item);
@@ -1409,7 +1420,7 @@ document.addEventListener("DOMContentLoaded", () => {
         BobigoProjects.saveProjects(projects);
         // orphan its chats back to plain chat list
         sessions.forEach((s) => { if (s.projectId === p.id) delete s.projectId; });
-        localStorage.setItem("bobigo_sessions", JSON.stringify(sessions));
+        persistSessions();
         if (currentProjectId === p.id) currentProjectId = null;
         closeProjectEditor();
         renderSidebar();
@@ -2349,6 +2360,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const decoder = new TextDecoder("utf-8");
             let buffer = "";
 
+            let streamEnded = false;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -2359,34 +2371,50 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 for (const line of lines) {
                     const trimmed = line.trim();
-                    if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
-                        try {
-                            const json = JSON.parse(trimmed.substring(6));
-                            const deltaObj = json.choices[0]?.delta || {};
+                    if (!trimmed.startsWith("data:")) continue;
+                    // Strip the "data:" prefix (with or without the SSE space).
+                    const payload = trimmed.slice(5).trim();
 
-                            const reasoningDelta = deltaObj.reasoning_content || "";
-                            const contentDelta = deltaObj.content || "";
-                            const incomingTools = deltaObj.tool_events;
+                    // Explicit end-of-stream sentinel. Break out proactively
+                    // instead of waiting for the HTTP layer to report `done` —
+                    // some model servers / proxies keep the SSE connection open
+                    // after "[DONE]", which would otherwise hang reader.read()
+                    // forever and leave the UI stuck in the generating state
+                    // (blinking caret + Stop button) even though the answer is
+                    // already complete.
+                    if (payload === "[DONE]") { streamEnded = true; break; }
 
-                            if (reasoningDelta) fullReasoning += reasoningDelta;
-                            if (contentDelta) fullAssistantContent += contentDelta;
-                            if (Array.isArray(incomingTools) && incomingTools.length) {
-                                toolEvents = toolEvents.concat(incomingTools);
-                            }
+                    try {
+                        const json = JSON.parse(payload);
+                        const deltaObj = json.choices[0]?.delta || {};
 
-                            // Keep in-memory message synchronized
-                            assistantMsgObj.content = fullAssistantContent;
-                            assistantMsgObj.reasoning = fullReasoning;
-                            assistantMsgObj.toolEvents = toolEvents;
+                        const reasoningDelta = deltaObj.reasoning_content || "";
+                        const contentDelta = deltaObj.content || "";
+                        const incomingTools = deltaObj.tool_events;
 
-                            scheduleLiveRender();
-
-                        } catch (err) {
-                            console.error("JSON parse error", err);
+                        if (reasoningDelta) fullReasoning += reasoningDelta;
+                        if (contentDelta) fullAssistantContent += contentDelta;
+                        if (Array.isArray(incomingTools) && incomingTools.length) {
+                            toolEvents = toolEvents.concat(incomingTools);
                         }
+
+                        // Keep in-memory message synchronized
+                        assistantMsgObj.content = fullAssistantContent;
+                        assistantMsgObj.reasoning = fullReasoning;
+                        assistantMsgObj.toolEvents = toolEvents;
+
+                        scheduleLiveRender();
+
+                    } catch (err) {
+                        console.error("JSON parse error", err);
                     }
                 }
+                if (streamEnded) break;
             }
+
+            // Proactively close the network stream so the server-side SSE
+            // connection is released promptly and nothing dangles.
+            try { await reader.cancel(); } catch (e) { /* already closed */ }
 
             assistantMsgObj.content = fullAssistantContent;
             assistantMsgObj.reasoning = fullReasoning;
@@ -2416,21 +2444,38 @@ document.addEventListener("DOMContentLoaded", () => {
             delete assistantMsgObj.isStreaming;
             activeGenerations.delete(targetSessionId);
 
-            const durationSec = (performance.now() - streamStartTime) / 1000;
-            const totalChars = (fullAssistantContent || "").length + (fullReasoning || "").length;
-            if (durationSec > 0.3 && totalChars > 0) {
-                const estTokens = estimateTokens(fullAssistantContent + fullReasoning);
-                const tps = (estTokens / durationSec).toFixed(1);
-                localStorage.setItem("bobigo_last_tps", tps);
-                updateHealthSpeedDisplay(tps);
-            }
-
-            saveSessions();
-
+            // Reset the composer and clear the streaming caret FIRST and
+            // unconditionally. Everything below (tps math, saveSessions) can
+            // throw — most commonly saveSessions() hitting a QuotaExceededError
+            // once a chat grows large (attachments/PDF text push localStorage
+            // over its limit). If that throw escaped the finally, the finished
+            // answer would keep its blinking "▋" caret and the input would stay
+            // stuck in the generating state. Do the UI reset up front so no
+            // later failure can leave the bar blinking forever.
             if (currentSessionId === targetSessionId) {
                 setGenerating(false);
                 renderCurrentSession();
             }
+
+            try {
+                const durationSec = (performance.now() - streamStartTime) / 1000;
+                const totalChars = (fullAssistantContent || "").length + (fullReasoning || "").length;
+                if (durationSec > 0.3 && totalChars > 0) {
+                    const estTokens = estimateTokens(fullAssistantContent + fullReasoning);
+                    const tps = (estTokens / durationSec).toFixed(1);
+                    localStorage.setItem("bobigo_last_tps", tps);
+                    updateHealthSpeedDisplay(tps);
+                }
+            } catch (e) {
+                console.warn("Speed (tps) update skipped:", e);
+            }
+
+            try {
+                saveSessions();
+            } catch (e) {
+                console.error("saveSessions failed — chat may not be persisted (storage full?):", e);
+            }
+
             if (appMode === "companion") renderSidebar();
             else renderHistoryList();
         }

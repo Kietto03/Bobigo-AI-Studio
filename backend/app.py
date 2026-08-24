@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.agent.compress import summarize_messages
 from backend.agent.loop import stream_agent
 from backend.config import HOST, LLM_BASE_URL, LLM_TIMEOUT, PORT, WEB_DIR
+from backend.db import open_database, repo
 from backend.health import probe_llm
 from backend.mcp import MCPManager
 from backend.tools import SCHEMAS
@@ -25,6 +26,8 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(LLM_TIMEOUT, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         app.state.http = client
+        # PostgreSQL pool (None if the DB is unavailable — app still serves).
+        app.state.db = await open_database()
         mcp = MCPManager()
         try:
             await mcp.start()
@@ -35,9 +38,22 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             await mcp.aclose()
+            if app.state.db is not None:
+                await app.state.db.close()
 
 
 app = FastAPI(title="Bobigo AI Studio", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    """Force browsers to revalidate static assets so a code update is never
+    masked by a stale cached copy (this is a local single-user dev app)."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 def _upstream(path: str) -> str:
@@ -206,6 +222,93 @@ async def compress_conversation(request: Request):
     except ValueError as exc:
         return JSONResponse({"error": f"Parse error: {exc}"}, status_code=502)
     return {"summary": summary, "compressed_count": len(to_summarize)}
+
+
+# --------------------------------------------------------------------------- #
+# Persistence store (PostgreSQL). Single-user: no scoping. The client keeps the
+# whole collection in memory and PUTs it back (debounced); we reconcile it into
+# the relational tables. 503 when the DB is down so the client falls back to its
+# local IndexedDB cache.
+# --------------------------------------------------------------------------- #
+def _db_or_503(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return None, JSONResponse({"error": "Database unavailable"}, status_code=503)
+    return db, None
+
+
+async def _read_list(request: Request) -> list:
+    body = await request.json()
+    return body if isinstance(body, list) else []
+
+
+@app.get("/api/sessions")
+async def get_sessions(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    return await repo.get_sessions(db)
+
+
+@app.put("/api/sessions")
+async def put_sessions(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    await repo.replace_sessions(db, await _read_list(request))
+    return {"ok": True}
+
+
+@app.get("/api/companions")
+async def get_companions(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    return await repo.get_companions(db)
+
+
+@app.put("/api/companions")
+async def put_companions(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    await repo.replace_companions(db, await _read_list(request))
+    return {"ok": True}
+
+
+@app.get("/api/projects")
+async def get_projects(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    return await repo.get_projects(db)
+
+
+@app.put("/api/projects")
+async def put_projects(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    await repo.replace_projects(db, await _read_list(request))
+    return {"ok": True}
+
+
+@app.post("/api/import")
+async def import_all(request: Request):
+    """One-time bulk import of legacy browser data. Only replaces provided keys."""
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Expected an object"}, status_code=400)
+    if isinstance(body.get("projects"), list):
+        await repo.replace_projects(db, body["projects"])
+    if isinstance(body.get("sessions"), list):
+        await repo.replace_sessions(db, body["sessions"])
+    if isinstance(body.get("companions"), list):
+        await repo.replace_companions(db, body["companions"])
+    return {"ok": True}
 
 
 @app.post("/v1/chat/completions")

@@ -17,14 +17,20 @@
 
     function loadCompanions() {
         try {
-            const raw = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+            const raw = global.BobigoDB
+                ? global.BobigoDB.getSync(STORAGE_KEY)
+                : JSON.parse(localStorage.getItem(STORAGE_KEY));
             return Array.isArray(raw) ? raw : [];
         } catch (e) {
             return [];
         }
     }
     function saveCompanions(list) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+        if (global.BobigoDB) {
+            global.BobigoDB.set(STORAGE_KEY, list);
+        } else {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+        }
     }
 
     function newCompanion(partial) {

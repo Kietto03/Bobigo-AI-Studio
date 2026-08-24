@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-backend.log
+*.log
 .DS_Store
 
 # Local MCP server config (machine-specific)
