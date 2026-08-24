@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.agent.compress import summarize_messages
@@ -198,6 +198,51 @@ async def extract_file(request: Request):
         return JSONResponse({"error": f"Lỗi xử lý tệp: {exc}"}, status_code=500)
 
 
+@app.post("/api/to-markdown")
+async def to_markdown(request: Request):
+    """Convert an uploaded document to Markdown and return it as a .md download."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        return JSONResponse({"error": "Cần multipart/form-data với trường 'file'"}, status_code=400)
+    form = await request.form()
+    uploaded_file = form.get("file")
+    if not uploaded_file:
+        return JSONResponse({"error": "Không tìm thấy tệp được tải lên"}, status_code=400)
+    filename = getattr(uploaded_file, "filename", "document") or "document"
+    raw_bytes = await uploaded_file.read()
+    if not raw_bytes:
+        return JSONResponse({"error": "Tệp rỗng hoặc không có dữ liệu"}, status_code=400)
+
+    from backend.tools.markdown_convert import convert_bytes_to_markdown
+    from backend.tools.files import extract_text_from_bytes, FileToolError
+
+    try:
+        # MarkItDown for rich formats; fall back to legacy extraction for plain
+        # text / code so the endpoint always returns something usable.
+        markdown = convert_bytes_to_markdown(raw_bytes, filename)
+        if not markdown:
+            markdown = extract_text_from_bytes(raw_bytes, filename=filename, max_bytes=5_000_000)
+    except FileToolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"Lỗi chuyển đổi: {exc}"}, status_code=500)
+
+    from pathlib import Path as _Path
+    from urllib.parse import quote
+
+    stem = _Path(filename).stem or "document"
+    ascii_stem = stem.encode("ascii", "ignore").decode() or "document"
+    disposition = (
+        f'attachment; filename="{ascii_stem}.md"; '
+        f"filename*=UTF-8''{quote(stem)}.md"
+    )
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": disposition},
+    )
+
+
 @app.post("/api/compress")
 async def compress_conversation(request: Request):
     try:
@@ -356,6 +401,37 @@ async def chat_completions(request: Request):
 def json_sse_error(message: str) -> bytes:
     payload = {"choices": [{"delta": {"content": message}}]}
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+@app.get("/api/files/{file_id}")
+async def serve_generated_file(file_id: str, download: int = 0):
+    """Serve a file the agent generated (inline for preview, or as a download)."""
+    from urllib.parse import quote
+    from backend.tools.genfiles import resolve_generated
+
+    path = resolve_generated(file_id)
+    if path is None or not path.exists():
+        return JSONResponse({"error": "File không tồn tại"}, status_code=404)
+    # Stored name is "<id>__<realName>"; present the real name to the user.
+    display = path.name.split("__", 1)[-1]
+    disp_type = "attachment" if download else "inline"
+    ascii_name = display.encode("ascii", "ignore").decode() or "file"
+    disposition = f"{disp_type}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(display)}"
+    return FileResponse(path, headers={"Content-Disposition": disposition})
+
+
+@app.get("/api/files/{file_id}/preview")
+async def preview_generated_file(file_id: str):
+    """Markdown preview of a generated document (used for docx/xlsx/pdf)."""
+    from backend.tools.genfiles import resolve_generated
+    from backend.tools.markdown_convert import convert_bytes_to_markdown
+
+    path = resolve_generated(file_id)
+    if path is None or not path.exists():
+        return JSONResponse({"error": "File không tồn tại"}, status_code=404)
+    display = path.name.split("__", 1)[-1]
+    markdown = convert_bytes_to_markdown(path.read_bytes(), display) or ""
+    return {"markdown": markdown}
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])

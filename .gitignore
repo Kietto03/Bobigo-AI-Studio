@@ -7,3 +7,6 @@ __pycache__/
 
 # Local MCP server config (machine-specific)
 mcp.json
+
+# Agent-generated files (served at /api/files/<id>)
+generated/

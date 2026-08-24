@@ -28,15 +28,36 @@ from backend.config import (
     REPLY_RESERVE,
 )
 from backend.tools import execute_tool, tool_schemas
+from backend.tools.genfiles import extract_file_markers
 
-TOOL_HINT = (
-    "Bạn có các công cụ: web_search, calculator, code_interpreter, url_reader, "
-    "list_files, read_file. Hãy gọi tool khi cần."
-)
-TOOL_HINT_EN = (
-    "You have tools: web_search, calculator, code_interpreter, url_reader, "
-    "list_files, read_file. Use them when needed."
-)
+def _build_tool_hint(is_en: bool, mcp: Any = None) -> str:
+    """Tool hint injected into the system prompt.
+
+    The tool list is derived from the live registry so it never goes stale when
+    tools are added. Includes a strict instruction so the (local) model actually
+    CALLS the file-generation tools instead of just claiming it made a file.
+    """
+    names = ", ".join(
+        (s.get("function") or {}).get("name", "") for s in tool_schemas(mcp)
+    )
+    if is_en:
+        return (
+            f"You have tools: {names}. Call a tool whenever it helps. "
+            "When the user asks you to CREATE / GENERATE / EXPORT a file "
+            "(markdown, code, CSV, JSON, HTML, SVG, Word .docx, Excel .xlsx …) "
+            "you MUST call the matching tool — create_file / create_docx / "
+            "create_xlsx — passing the real file content in the arguments. "
+            "Never merely say you created a file or show its name in text: if you "
+            "did not call the tool, no file exists."
+        )
+    return (
+        f"Bạn có các công cụ: {names}. Hãy gọi tool khi cần. "
+        "Khi người dùng yêu cầu TẠO / XUẤT một file (markdown, code, CSV, JSON, "
+        "HTML, SVG, Word .docx, Excel .xlsx …) thì BẮT BUỘC phải gọi đúng tool — "
+        "create_file / create_docx / create_xlsx — kèm nội dung file thật trong "
+        "tham số. Tuyệt đối không chỉ nói 'đã tạo file' hay ghi tên file bằng lời: "
+        "nếu bạn không gọi tool thì không có file nào được tạo ra."
+    )
 
 LlmStreamer = Callable[[dict[str, Any]], AsyncIterator[dict[str, Any]]]
 ToolRunner = Callable[[str, Any], Awaitable[str]]
@@ -65,17 +86,23 @@ def prepare_messages(
     messages: list[dict[str, Any]],
     *,
     agent_tools: bool = True,
+    mcp: Any = None,
 ) -> list[dict[str, Any]]:
     prepared = [dict(m) for m in messages if m.get("role") != "system"]
     existing_sys = next((dict(m) for m in messages if m.get("role") == "system"), None)
     if existing_sys is None:
-        prepared.insert(0, {"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
+        content = DEFAULT_SYSTEM_PROMPT
+        if agent_tools:
+            content = (content.rstrip() + "\n\n" + _build_tool_hint(False, mcp)).strip()
+        prepared.insert(0, {"role": "system", "content": content})
         return prepared
     sys_body = existing_sys.get("content") or ""
     is_en = "You are" in sys_body or "English" in sys_body or "tools:" in sys_body
-    hint = TOOL_HINT_EN if is_en else TOOL_HINT
-    if agent_tools and "web_search" not in sys_body and "code_interpreter" not in sys_body:
-        existing_sys["content"] = (sys_body.rstrip() + "\n\n" + hint).strip()
+    # Append the (dynamic) tool hint whenever it isn't already there — keyed on
+    # "create_file" so older prompts that only mention the legacy tools still get
+    # the file-generation instruction.
+    if agent_tools and "create_file" not in sys_body:
+        existing_sys["content"] = (sys_body.rstrip() + "\n\n" + _build_tool_hint(is_en, mcp)).strip()
     prepared.insert(0, existing_sys)
     return prepared
 
@@ -124,16 +151,23 @@ async def _run_calls(
         name = fn.get("name") or ""
         raw_args = fn.get("arguments")
         result = await tool_runner(name, _parse_arguments(raw_args))
-        events.append({
+        # File-generation tools embed a hidden marker carrying file metadata.
+        # Strip it so the model sees clean text, and surface it as event.files
+        # for the UI to render a preview/download card.
+        clean, files = extract_file_markers(result)
+        event: dict[str, Any] = {
             "id": call.get("id") or "",
             "name": name,
             "arguments": raw_args if isinstance(raw_args, str) else json.dumps(raw_args, ensure_ascii=False),
-            "result": result[:2000],
-        })
+            "result": clean[:2000],
+        }
+        if files:
+            event["files"] = files
+        events.append(event)
         tool_messages.append({
             "role": "tool",
             "tool_call_id": call.get("id") or "",
-            "content": result,
+            "content": clean,
         })
     return events, tool_messages
 
@@ -150,6 +184,7 @@ async def stream_agent(
     messages = prepare_messages(
         list(body.get("messages") or []),
         agent_tools=agent_tools,
+        mcp=mcp,
     )
     model = body.get("model") or DEFAULT_MODEL
     runner = tool_runner or (lambda n, a: execute_tool(n, a, http_client, mcp))
@@ -164,23 +199,11 @@ async def stream_agent(
         async for item in default_llm_stream(payload, http_client):
             yield item
 
+    # Set once we fall back to a tool-less completion (see the retry below).
+    tools_disabled = False
     try:
         for iteration in range(MAX_AGENT_ITERATIONS):
             reserve = int(body.get("max_tokens") or REPLY_RESERVE)
-            payload: dict[str, Any] = {
-                "model": model,
-                "messages": trim_messages(messages, window=CONTEXT_WINDOW, reserve=reserve),
-                "temperature": body.get("temperature", 0.7),
-                "top_p": body.get("top_p", 0.9),
-                "stream": True,
-            }
-            if agent_tools:
-                payload["tools"] = tool_schemas(mcp)
-                payload["tool_choice"] = "auto"
-            if body.get("repeat_penalty") is not None:
-                payload["repeat_penalty"] = body["repeat_penalty"]
-            if body.get("max_tokens"):
-                payload["max_tokens"] = body["max_tokens"]
 
             acc_calls: dict[int, dict[str, Any]] = {}
             content_parts: list[str] = []
@@ -188,29 +211,64 @@ async def stream_agent(
             finish_reason = None
             forwarded_any = False
 
-            async for event in _llm(payload):
-                choice = (event.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-                msg = choice.get("message") or {}
-                if msg.get("tool_calls"):
-                    for i, tc in enumerate(msg["tool_calls"]):
-                        merge_tool_call_delta(acc_calls, [{**tc, "index": tc.get("index", i)}])
-                if delta.get("tool_calls"):
-                    merge_tool_call_delta(acc_calls, delta["tool_calls"])
-                reasoning = delta.get("reasoning_content") or ""
-                text = delta.get("content") or ""
-                if reasoning:
-                    reasoning_parts.append(reasoning)
-                    yield sse_pack(content_chunk(reasoning=reasoning))
-                    forwarded_any = True
-                if text:
-                    content_parts.append(text)
-                    assembled = "".join(content_parts)
-                    if not looks_like_tool_markup(assembled) and not acc_calls:
-                        yield sse_pack(content_chunk(content=text))
-                        forwarded_any = True
+            # Stream the model. If llama-server rejects the request (HTTP 500) —
+            # which happens when it can't parse a tool call the local model
+            # emitted, e.g. a create_file whose large multi-line `content` isn't
+            # valid JSON — and nothing has been streamed yet, retry this turn
+            # WITHOUT tools so the user still gets a plain-text answer instead of
+            # a hard error.
+            while True:
+                use_tools = bool(agent_tools) and not tools_disabled
+                payload: dict[str, Any] = {
+                    "model": model,
+                    "messages": trim_messages(messages, window=CONTEXT_WINDOW, reserve=reserve),
+                    "temperature": body.get("temperature", 0.7),
+                    "top_p": body.get("top_p", 0.9),
+                    "stream": True,
+                }
+                if use_tools:
+                    payload["tools"] = tool_schemas(mcp)
+                    payload["tool_choice"] = "auto"
+                if body.get("repeat_penalty") is not None:
+                    payload["repeat_penalty"] = body["repeat_penalty"]
+                if body.get("max_tokens"):
+                    payload["max_tokens"] = body["max_tokens"]
+
+                acc_calls = {}
+                content_parts = []
+                reasoning_parts = []
+                finish_reason = None
+                forwarded_any = False
+                try:
+                    async for event in _llm(payload):
+                        choice = (event.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                        msg = choice.get("message") or {}
+                        if msg.get("tool_calls"):
+                            for i, tc in enumerate(msg["tool_calls"]):
+                                merge_tool_call_delta(acc_calls, [{**tc, "index": tc.get("index", i)}])
+                        if delta.get("tool_calls"):
+                            merge_tool_call_delta(acc_calls, delta["tool_calls"])
+                        reasoning = delta.get("reasoning_content") or ""
+                        text = delta.get("content") or ""
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            yield sse_pack(content_chunk(reasoning=reasoning))
+                            forwarded_any = True
+                        if text:
+                            content_parts.append(text)
+                            assembled = "".join(content_parts)
+                            if not looks_like_tool_markup(assembled) and not acc_calls:
+                                yield sse_pack(content_chunk(content=text))
+                                forwarded_any = True
+                    break
+                except httpx.HTTPError:
+                    if use_tools and not forwarded_any:
+                        tools_disabled = True
+                        continue
+                    raise
 
             full_content = "".join(content_parts)
             full_reasoning = "".join(reasoning_parts)

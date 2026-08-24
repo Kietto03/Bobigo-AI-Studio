@@ -22,14 +22,10 @@ DATABASE_URL = os.environ.get(
 # Agent defaults
 DEFAULT_MODEL = "qwen35b-uncensored"
 DEFAULT_SYSTEM_PROMPT = (
-    "Bạn là Bobigo, trợ lý AI. "
-    "Bạn có các công cụ: web_search, calculator, code_interpreter, url_reader, list_files, read_file. "
-    "Hãy dùng tool khi cần. Trả lời chính xác, hữu ích và thân thiện."
+    "Bạn là Bobigo, trợ lý AI. Trả lời chính xác, hữu ích và thân thiện."
 )
 DEFAULT_SYSTEM_PROMPT_EN = (
-    "You are Bobigo, an AI assistant. "
-    "You have tools: web_search, calculator, code_interpreter, url_reader, list_files, read_file. "
-    "Use a tool when it helps. Be accurate, useful, and friendly."
+    "You are Bobigo, an AI assistant. Be accurate, useful, and friendly."
 )
 
 # Tool settings

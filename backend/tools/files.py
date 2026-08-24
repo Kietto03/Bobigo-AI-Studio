@@ -28,6 +28,21 @@ def _root() -> Path:
 
 def extract_text_from_bytes(data: bytes, filename: str = "", max_bytes: int = MAX_READ_BYTES) -> str:
     suffix = Path(filename).suffix.lower() if filename else ""
+
+    # Rich documents (DOCX/PPTX/XLSX/PDF/HTML/images/…) → Markdown via MarkItDown.
+    # Falls through to the legacy handling below if MarkItDown is unavailable or
+    # the conversion yields nothing.
+    from backend.tools.markdown_convert import (
+        MARKITDOWN_SUFFIXES,
+        convert_bytes_to_markdown,
+    )
+    if suffix in MARKITDOWN_SUFFIXES:
+        md = convert_bytes_to_markdown(data, filename)
+        if md:
+            if len(md) > max_bytes:
+                return md[:max_bytes] + "\n\n[đã cắt bớt vì tài liệu quá dài]"
+            return md
+
     if suffix == ".pdf":
         try:
             import io
@@ -94,6 +109,34 @@ def read_workspace_file(path: str, max_bytes: int = MAX_READ_BYTES) -> str:
     rel = target.relative_to(_root()).as_posix()
     content = extract_text_from_bytes(data, filename=target.name, max_bytes=max_bytes)
     return f"# {rel}\n" + content
+
+
+def convert_workspace_file_to_markdown(path: str, max_bytes: int = MAX_READ_BYTES) -> str:
+    """Convert a workspace file (incl. DOCX/PPTX/XLSX/PDF/HTML that read_file
+    refuses) to Markdown via MarkItDown, with the same safety checks."""
+    from backend.tools.markdown_convert import (
+        MARKITDOWN_SUFFIXES,
+        convert_bytes_to_markdown,
+    )
+    target = resolve_in_workspace(path)
+    if not target.exists():
+        raise FileToolError(f"không tồn tại: {path}")
+    if not target.is_file():
+        raise FileToolError("không phải file")
+    if _is_secret_file(target):
+        raise FileToolError("file bị chặn")
+    allowed = _TEXT_SUFFIXES | MARKITDOWN_SUFFIXES
+    if target.suffix.lower() not in allowed:
+        raise FileToolError("định dạng không hỗ trợ chuyển sang Markdown")
+    data = target.read_bytes()
+    rel = target.relative_to(_root()).as_posix()
+    md = convert_bytes_to_markdown(data, filename=target.name)
+    if not md:
+        # plain text / code, or MarkItDown unavailable → legacy extraction
+        md = extract_text_from_bytes(data, filename=target.name, max_bytes=max_bytes)
+    if len(md) > max_bytes:
+        md = md[:max_bytes] + "\n\n[đã cắt bớt vì tài liệu quá dài]"
+    return f"# {rel}\n" + md
 
 
 def list_workspace_files(path: str = ".", pattern: str = "*") -> str:

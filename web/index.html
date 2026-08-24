@@ -156,10 +156,14 @@
             <div class="chat-input-wrapper">
                 <div class="attachment-preview-bar hidden" id="attachment-preview-bar"></div>
                 <div class="chat-input-box glass">
-                    <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp văn bản / PDF">
+                    <button class="input-action-btn" id="attach-file-btn" title="Đính kèm tệp (PDF, Word, Excel, PowerPoint, văn bản…)">
                         <i class="fa-solid fa-paperclip"></i>
                     </button>
-                    <input type="file" id="file-input" accept=".pdf,.docx,.txt,.md,.json,.py,.js,.html,.css,.csv,.tsv,.xml,.yaml,.yml,.sql,.sh,.log,.c,.cpp,.h,.hpp,.rs,.go,.java,.php,.rb,.swift,.kt,.env.example" style="display: none;">
+                    <input type="file" id="file-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.epub,.rtf,.html,.htm,.txt,.md,.json,.py,.js,.css,.csv,.tsv,.xml,.yaml,.yml,.sql,.sh,.log,.c,.cpp,.h,.hpp,.rs,.go,.java,.php,.rb,.swift,.kt,.env.example" style="display: none;">
+                    <button class="input-action-btn" id="md-convert-btn" title="Chuyển tài liệu sang Markdown (.md) rồi tải về">
+                        <i class="fa-solid fa-file-arrow-down"></i>
+                    </button>
+                    <input type="file" id="md-file-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.epub,.rtf,.html,.htm,.csv,.json,.xml,.txt" style="display: none;">
                     
                     <textarea 
                         id="user-input" 
@@ -363,6 +367,20 @@
                 <button type="button" class="btn-glass" id="project-delete-btn" data-i18n="del">Xóa</button>
                 <button type="button" class="btn-primary" id="project-save-btn" data-i18n="save">Lưu</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Generated-file preview modal -->
+    <div class="file-preview-overlay" id="file-preview-modal" style="display:none;">
+        <div class="file-preview-dialog">
+            <div class="file-preview-head">
+                <div class="fp-title"><i class="fa-solid fa-file-lines"></i> <span id="fp-name">file</span></div>
+                <div class="fp-head-actions">
+                    <a id="fp-download" class="fp-btn" href="#" download title="Tải về"><i class="fa-solid fa-download"></i></a>
+                    <button type="button" id="fp-close" class="fp-btn" title="Đóng"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+            </div>
+            <div class="file-preview-body" id="fp-body"></div>
         </div>
     </div>
 

@@ -54,4 +54,14 @@ def trim_messages(
 
     while kept and kept[0].get("role") == "tool":
         kept.pop(0)
+
+    # The Qwen --jinja chat template raises a 500 ("No user query found in
+    # messages") if the prompt contains no user message. Trimming a long tool
+    # loop — or stripping a leading tool result — can remove every user turn, so
+    # guarantee the most recent user message survives.
+    if not any(m.get("role") == "user" for m in kept):
+        last_user = next((m for m in reversed(rest) if m.get("role") == "user"), None)
+        if last_user is not None:
+            kept.insert(0, last_user)
+
     return system + kept

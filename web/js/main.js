@@ -60,6 +60,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     const sendBtn = document.getElementById("send-btn");
     const attachFileBtn = document.getElementById("attach-file-btn");
     const fileInput = document.getElementById("file-input");
+    const mdConvertBtn = document.getElementById("md-convert-btn");
+    const mdFileInput = document.getElementById("md-file-input");
+    const filePreviewModal = document.getElementById("file-preview-modal");
+    const fpName = document.getElementById("fp-name");
+    const fpBody = document.getElementById("fp-body");
+    const fpDownload = document.getElementById("fp-download");
+    const fpClose = document.getElementById("fp-close");
     const attachmentPreviewBar = document.getElementById("attachment-preview-bar");
     let attachedFiles = [];
 
@@ -100,6 +107,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     let contextInfo = { window: 8192, reserve: 2048 }; // from /api/health
     let isCompressing = false;
     let contextMeter = null; // assigned once DOM refs exist (see init below)
+
+    // Icon/label per generated-file kind. Declared early (before initSessions →
+    // renderCurrentSession runs) so restoring a chat with file cards on boot
+    // doesn't hit a temporal-dead-zone error.
+    const FILE_KIND_META = {
+        markdown: { icon: "fa-file-lines", label: "Markdown" },
+        code:     { icon: "fa-file-code", label: "Code" },
+        csv:      { icon: "fa-file-csv", label: "CSV" },
+        html:     { icon: "fa-code", label: "HTML" },
+        svg:      { icon: "fa-image", label: "SVG" },
+        image:    { icon: "fa-image", label: "Ảnh" },
+        docx:     { icon: "fa-file-word", label: "Word" },
+        xlsx:     { icon: "fa-file-excel", label: "Excel" },
+        pdf:      { icon: "fa-file-pdf", label: "PDF" },
+        text:     { icon: "fa-file", label: "Văn bản" },
+    };
 
     // Themes: each = a base family (dark/light) + optional accent class.
     // Declared here (before initTheme runs) to avoid a TDZ error at boot.
@@ -456,6 +479,10 @@ document.addEventListener("DOMContentLoaded", async () => {
             url_reader: "Đọc trang web · chặn SSRF",
             list_files: "Liệt kê file trong workspace",
             read_file: "Đọc file text/PDF trong workspace",
+            convert_to_markdown: "Chuyển tài liệu (Word/Excel/PPT/PDF…) sang Markdown · MarkItDown",
+            create_file: "Tạo file text/code/markdown/CSV/HTML/SVG · xem trước & tải",
+            create_docx: "Tạo tài liệu Word (.docx)",
+            create_xlsx: "Tạo bảng tính Excel (.xlsx)",
         },
         en: {
             web_search: "Web search via DuckDuckGo · fresh facts",
@@ -464,6 +491,10 @@ document.addEventListener("DOMContentLoaded", async () => {
             url_reader: "Read web pages · blocks SSRF",
             list_files: "List workspace files",
             read_file: "Read workspace text/PDF files",
+            convert_to_markdown: "Convert docs (Word/Excel/PPT/PDF…) to Markdown · MarkItDown",
+            create_file: "Create text/code/markdown/CSV/HTML/SVG files · preview & download",
+            create_docx: "Create a Word document (.docx)",
+            create_xlsx: "Create an Excel spreadsheet (.xlsx)",
         },
     };
 
@@ -899,6 +930,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     // --------------------------------------------------------------------------
     // Web Search Function
     // --------------------------------------------------------------------------
+    // Gather every file produced by a message's tool calls.
+    function collectGeneratedFiles(toolEvents) {
+        if (!Array.isArray(toolEvents)) return [];
+        const out = [];
+        toolEvents.forEach((ev) => {
+            if (Array.isArray(ev.files)) ev.files.forEach((f) => { if (f && f.id) out.push(f); });
+        });
+        return out;
+    }
+
+    function buildGeneratedFilesHTML(files) {
+        if (!files || files.length === 0) return "";
+        const cards = files.map((f) => {
+            const meta = FILE_KIND_META[f.kind] || FILE_KIND_META.text;
+            const size = f.size ? formatFileSize(f.size) : "";
+            const dl = `/api/files/${encodeURIComponent(f.id)}?download=1`;
+            return `
+                <div class="generated-file-card" data-id="${escapeHtml(f.id)}" data-name="${escapeHtml(f.name || "")}" data-kind="${escapeHtml(f.kind || "text")}" data-mime="${escapeHtml(f.mime || "")}">
+                    <div class="gfc-icon"><i class="fa-solid ${meta.icon}"></i></div>
+                    <div class="gfc-info">
+                        <div class="gfc-name" title="${escapeHtml(f.name || "")}">${escapeHtml(f.name || "file")}</div>
+                        <div class="gfc-meta">${meta.label}${size ? ` · ${size}` : ""}</div>
+                    </div>
+                    <div class="gfc-actions">
+                        <button type="button" class="gfc-btn gen-file-view" title="Xem trước"><i class="fa-solid fa-eye"></i></button>
+                        <a class="gfc-btn" href="${dl}" download="${escapeHtml(f.name || "file")}" title="Tải về"><i class="fa-solid fa-download"></i></a>
+                    </div>
+                </div>`;
+        }).join("");
+        return `<div class="generated-files">${cards}</div>`;
+    }
+
     function buildToolEventsHTML(events, collapsed) {
         if (!events || events.length === 0) return "";
         const i18n = window.BobigoI18n;
@@ -1931,6 +1994,143 @@ document.addEventListener("DOMContentLoaded", async () => {
         fileInput.click();
     });
 
+    // Convert a document to Markdown and download it as a .md file.
+    if (mdConvertBtn && mdFileInput) {
+        mdConvertBtn.addEventListener("click", () => mdFileInput.click());
+        mdFileInput.addEventListener("change", async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            mdFileInput.value = "";
+
+            if (file.size > 25 * 1024 * 1024) {
+                alert("Tệp quá lớn (tối đa 25MB).");
+                return;
+            }
+
+            const original = mdConvertBtn.innerHTML;
+            mdConvertBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            mdConvertBtn.disabled = true;
+            try {
+                const formData = new FormData();
+                formData.append("file", file);
+                const resp = await fetch("/api/to-markdown", { method: "POST", body: formData });
+                if (!resp.ok) {
+                    const errJson = await resp.json().catch(() => ({}));
+                    throw new Error(errJson.error || `HTTP ${resp.status}`);
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = (file.name.replace(/\.[^.]+$/, "") || "document") + ".md";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert("Không chuyển được sang Markdown: " + (err.message || err));
+            } finally {
+                mdConvertBtn.innerHTML = original;
+                mdConvertBtn.disabled = false;
+            }
+        });
+    }
+
+    // ---- Generated-file preview modal --------------------------------------
+    function csvToTableHTML(text) {
+        const lines = String(text || "").replace(/\r/g, "").split("\n").filter((l) => l.length > 0);
+        if (!lines.length) return '<div class="fp-empty">(trống)</div>';
+        const rows = lines.map((l) => l.split(","));
+        const head = rows[0];
+        const body = rows.slice(1);
+        let html = '<div class="fp-table-wrap"><table class="fp-table"><thead><tr>';
+        head.forEach((c) => { html += `<th>${escapeHtml(c)}</th>`; });
+        html += "</tr></thead><tbody>";
+        body.forEach((r) => {
+            html += "<tr>";
+            r.forEach((c) => { html += `<td>${escapeHtml(c)}</td>`; });
+            html += "</tr>";
+        });
+        return html + "</tbody></table></div>";
+    }
+
+    async function openFilePreview(file) {
+        if (!filePreviewModal) return;
+        const url = `/api/files/${encodeURIComponent(file.id)}`;
+        const kind = file.kind || "text";
+        fpName.textContent = file.name || "file";
+        fpDownload.href = `${url}?download=1`;
+        fpDownload.setAttribute("download", file.name || "file");
+        fpBody.innerHTML = '<div class="fp-loading"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+        filePreviewModal.style.display = "flex";
+        try {
+            if (kind === "image" || kind === "svg") {
+                fpBody.innerHTML = `<div class="fp-image"><img src="${url}" alt="${escapeHtml(file.name || "")}"></div>`;
+            } else if (kind === "html") {
+                const html = await (await fetch(url)).text();
+                const frame = document.createElement("iframe");
+                frame.className = "fp-frame";
+                frame.setAttribute("sandbox", "");
+                frame.srcdoc = html;
+                fpBody.innerHTML = "";
+                fpBody.appendChild(frame);
+            } else if (kind === "pdf") {
+                fpBody.innerHTML = `<iframe class="fp-frame" src="${url}"></iframe>`;
+            } else if (kind === "docx" || kind === "xlsx") {
+                const data = await (await fetch(`${url}/preview`)).json();
+                fpBody.innerHTML = `<div class="fp-doc response-content">${renderMarkdown(data.markdown || "*(không có nội dung)*")}</div>`;
+                enhanceMarkdownElements(fpBody);
+            } else if (kind === "csv") {
+                fpBody.innerHTML = csvToTableHTML(await (await fetch(url)).text());
+            } else if (kind === "markdown") {
+                const text = await (await fetch(url)).text();
+                fpBody.innerHTML = `<div class="fp-doc response-content">${renderMarkdown(text)}</div>`;
+                enhanceMarkdownElements(fpBody);
+            } else {
+                const text = await (await fetch(url)).text();
+                const pre = document.createElement("pre");
+                pre.className = "fp-code";
+                const code = document.createElement("code");
+                code.textContent = text;
+                pre.appendChild(code);
+                fpBody.innerHTML = "";
+                fpBody.appendChild(pre);
+                if (typeof hljs !== "undefined") { try { hljs.highlightElement(code); } catch (e) { /* noop */ } }
+            }
+        } catch (e) {
+            fpBody.innerHTML = `<div class="fp-error">Không tải được nội dung: ${escapeHtml(e.message || String(e))}</div>`;
+        }
+    }
+
+    function closeFilePreview() {
+        if (!filePreviewModal) return;
+        filePreviewModal.style.display = "none";
+        fpBody.innerHTML = "";
+    }
+
+    if (filePreviewModal) {
+        fpClose.addEventListener("click", closeFilePreview);
+        filePreviewModal.addEventListener("click", (e) => {
+            if (e.target === filePreviewModal) closeFilePreview();
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && filePreviewModal.style.display === "flex") closeFilePreview();
+        });
+        // Delegated: any "view" button on a generated-file card opens the modal.
+        messagesContainer.addEventListener("click", (e) => {
+            const btn = e.target.closest(".gen-file-view");
+            if (!btn) return;
+            const card = btn.closest(".generated-file-card");
+            if (!card) return;
+            openFilePreview({
+                id: card.dataset.id,
+                name: card.dataset.name,
+                kind: card.dataset.kind,
+                mime: card.dataset.mime,
+            });
+        });
+    }
+
     fileInput.addEventListener("change", async (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -1942,16 +2142,21 @@ document.addEventListener("DOMContentLoaded", async () => {
             return;
         }
 
-        const isPdf = file.name.toLowerCase().endsWith(".pdf");
+        const lname = file.name.toLowerCase();
+        const isPdf = lname.endsWith(".pdf");
         const codeExts = [".py", ".js", ".html", ".css", ".json", ".sql", ".sh", ".c", ".cpp", ".rs", ".go", ".java", ".php", ".rb", ".swift", ".kt"];
-        const isCode = codeExts.some(ext => file.name.toLowerCase().endsWith(ext));
+        const isCode = codeExts.some(ext => lname.endsWith(ext));
+        // Binary/structured docs must be converted server-side (MarkItDown);
+        // reading them with file.text() in the browser would yield garbage.
+        const richExts = [".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".epub", ".rtf", ".odt", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".ipynb", ".msg"];
+        const isRich = richExts.some(ext => lname.endsWith(ext));
 
         // Show spinner on attach button
         attachFileBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
         attachFileBtn.disabled = true;
 
         try {
-            if (isPdf || file.size > 150 * 1024) {
+            if (isPdf || isRich || file.size > 150 * 1024) {
                 // Send to backend extractor
                 const formData = new FormData();
                 formData.append("file", file);
@@ -2326,6 +2531,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                 const thinkPh = (i18n && i18n.t(lang, "thinkingPlaceholder")) || "Đang suy nghĩ…";
                 htmlOutput += `<span class="cursor-typing">${escapeHtml(thinkPh)}</span>`;
             }
+            htmlOutput += buildGeneratedFilesHTML(collectGeneratedFiles(toolEvents));
             return htmlOutput;
         }
 
@@ -2593,6 +2799,11 @@ document.addEventListener("DOMContentLoaded", async () => {
             } else {
                 htmlOutput += `<div class="response-content">${renderMarkdown(content)}</div>`;
             }
+        }
+
+        // Cards for files the agent generated (preview + download).
+        if (role !== "user") {
+            htmlOutput += buildGeneratedFilesHTML(collectGeneratedFiles(toolEvents));
         }
 
         bubble.innerHTML = htmlOutput;

@@ -11,7 +11,13 @@ import httpx
 from backend.config import MAX_SEARCH_RESULTS
 from backend.tools.calculator import CalculatorError, calculate
 from backend.tools.code_interpreter import CodeInterpreterError, run_python
-from backend.tools.files import FileToolError, list_workspace_files, read_workspace_file
+from backend.tools.files import (
+    FileToolError,
+    convert_workspace_file_to_markdown,
+    list_workspace_files,
+    read_workspace_file,
+)
+from backend.tools.filegen import FileGenError, create_docx, create_file, create_xlsx
 from backend.tools.url_reader import UrlReaderError, read_url
 from backend.tools.web_search import duckduckgo_search, format_search_results
 
@@ -103,6 +109,65 @@ SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_to_markdown",
+            "description": "Chuyển một tài liệu trong workspace (PDF, Word .docx, PowerPoint .pptx, Excel .xlsx, HTML, ảnh…) sang văn bản Markdown bằng MarkItDown.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Đường dẫn tương đối tới tài liệu, ví dụ tài_liệu.docx"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": "Tạo một file văn bản/mã nguồn để người dùng xem trước và tải về (Markdown, code, CSV, JSON, HTML, SVG…). Dùng khi người dùng muốn nhận một file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Tên file kèm đuôi, ví dụ bao_cao.md, script.py, du_lieu.csv"},
+                    "content": {"type": "string", "description": "Toàn bộ nội dung văn bản của file"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_docx",
+            "description": "Tạo tài liệu Word (.docx) từ nội dung dạng markdown nhẹ ('#'=tiêu đề, '- '=gạch đầu dòng, còn lại=đoạn văn).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Tên file, ví dụ bao_cao.docx"},
+                    "content": {"type": "string", "description": "Nội dung tài liệu (mỗi dòng một mục)"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_xlsx",
+            "description": "Tạo bảng tính Excel (.xlsx) từ dữ liệu dạng CSV (mỗi dòng một hàng, ngăn bằng dấu phẩy).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Tên file, ví dụ du_lieu.xlsx"},
+                    "content": {"type": "string", "description": "Dữ liệu CSV, ví dụ 'Tên,Điểm\\nAn,9\\nBình,8'"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
 ]
 
 
@@ -143,6 +208,26 @@ async def _read_file(args: dict[str, Any], client: httpx.AsyncClient | None) -> 
     return await asyncio.to_thread(read_workspace_file, str(args.get("path", "")))
 
 
+async def _convert_to_markdown(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
+    del client
+    return await asyncio.to_thread(convert_workspace_file_to_markdown, str(args.get("path", "")))
+
+
+async def _create_file(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
+    del client
+    return await asyncio.to_thread(create_file, str(args.get("filename", "")), str(args.get("content", "")))
+
+
+async def _create_docx(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
+    del client
+    return await asyncio.to_thread(create_docx, str(args.get("filename", "")), str(args.get("content", "")))
+
+
+async def _create_xlsx(args: dict[str, Any], client: httpx.AsyncClient | None) -> str:
+    del client
+    return await asyncio.to_thread(create_xlsx, str(args.get("filename", "")), str(args.get("content", "")))
+
+
 _HANDLERS: dict[str, ToolHandler] = {
     "web_search": _web_search,
     "calculator": _calculator,
@@ -150,6 +235,10 @@ _HANDLERS: dict[str, ToolHandler] = {
     "url_reader": _url_reader,
     "list_files": _list_files,
     "read_file": _read_file,
+    "convert_to_markdown": _convert_to_markdown,
+    "create_file": _create_file,
+    "create_docx": _create_docx,
+    "create_xlsx": _create_xlsx,
 }
 
 
@@ -200,7 +289,7 @@ async def execute_tool(
         return "Lỗi: arguments sai kiểu"
     try:
         return await handler(parsed, client)
-    except (CalculatorError, CodeInterpreterError, UrlReaderError, FileToolError) as exc:
+    except (CalculatorError, CodeInterpreterError, UrlReaderError, FileToolError, FileGenError) as exc:
         return f"Lỗi {name}: {exc}"
     except Exception as exc:
         return f"Lỗi {name}: {exc}"

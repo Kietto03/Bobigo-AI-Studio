@@ -94,6 +94,51 @@ def test_iteration_cap():
     assert raw.count("calculator") >= MAX_AGENT_ITERATIONS or "giới hạn" in raw
 
 
+def test_falls_back_to_no_tools_on_http_500():
+    # llama-server returns 500 when it can't parse a tool call the local model
+    # emitted (e.g. create_file with a huge, invalidly-escaped content arg).
+    # The loop must retry the turn without tools so the user still gets an answer.
+    import httpx
+
+    async def llm(payload):
+        if payload.get("tools"):
+            raise httpx.HTTPStatusError(
+                "500", request=httpx.Request("POST", "http://x"),
+                response=httpx.Response(500),
+            )
+        for chunk in ["Đây là ", "câu trả lời."]:
+            yield {"choices": [{"delta": {"content": chunk}}]}
+
+    async def tools(_n, _a):
+        return "unused"
+
+    raw = _collect({"messages": [{"role": "user", "content": "tạo file"}],
+                    "agent_tools": True}, llm, tools)
+    assert "câu trả lời." in raw
+    assert "Lỗi" not in raw
+    assert raw.count("data: [DONE]") == 1
+
+
+def test_prepare_messages_injects_file_tool_instruction():
+    from backend.agent.loop import prepare_messages
+
+    # No system message → default prompt + dynamic hint (with agent tools on).
+    msgs = prepare_messages([{"role": "user", "content": "tạo file html"}], agent_tools=True)
+    sys = msgs[0]["content"]
+    assert "create_file" in sys and "create_docx" in sys and "create_xlsx" in sys
+    assert "BẮT BUỘC" in sys  # strict: must call the tool, not narrate
+
+    # An older system prompt that only lists legacy tools still gets the hint.
+    legacy = [{"role": "system", "content": "Bạn là trợ lý. Có web_search."},
+              {"role": "user", "content": "tạo file"}]
+    got = prepare_messages(legacy, agent_tools=True)[0]["content"]
+    assert "create_file" in got
+
+    # Tools off → no tool hint at all.
+    off = prepare_messages([{"role": "user", "content": "x"}], agent_tools=False)
+    assert "create_file" not in off[0]["content"]
+
+
 def test_extract_qwen_xml_tool_call():
     text = '<tool_call>\ncalculator\n```json\n{"expression": "1+1"}\n```\n</tool_call>'
     calls = extract_tool_calls_from_text(text)

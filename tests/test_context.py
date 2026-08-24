@@ -29,5 +29,27 @@ def test_trim_caps_tool_results():
     assert "đã cắt" in tool["content"]
 
 
+def test_trim_always_keeps_a_user_message():
+    # A long tool/assistant loop that would push the user turn out of budget.
+    # The Qwen --jinja template 500s if no user message survives, so trim must
+    # always retain the most recent user query.
+    messages = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "câu hỏi gốc"}]
+    for _ in range(12):
+        messages.append({"role": "assistant", "content": "phân tích " * 2000})
+    trimmed = trim_messages(messages, window=8192, reserve=2048)
+    assert any(m["role"] == "user" for m in trimmed)
+
+
+def test_trim_reinserts_user_when_only_tool_remains():
+    messages = [
+        {"role": "user", "content": "làm giúp"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "function": {"name": "read_file"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "Z" * 40_000},
+    ]
+    trimmed = trim_messages(messages, window=2048, reserve=512)
+    assert any(m["role"] == "user" for m in trimmed)
+
+
 def test_estimate_tokens_positive():
     assert estimate_tokens("abcd") >= 1
