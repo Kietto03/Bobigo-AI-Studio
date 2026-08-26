@@ -1,6 +1,13 @@
+import ipaddress
+
 import pytest
 
-from backend.tools.url_reader import UrlReaderError, html_to_text, validate_url
+from backend.tools.url_reader import (
+    UrlReaderError,
+    ensure_public_resolution,
+    html_to_text,
+    validate_url,
+)
 
 
 @pytest.mark.parametrize(
@@ -28,3 +35,28 @@ def test_html_to_text_strips_markup():
     assert "Hi" in text
     assert "There" in text
     assert "alert" not in text
+
+
+def test_ensure_public_resolution_accepts_public(monkeypatch):
+    import backend.tools.url_reader as ur
+
+    monkeypatch.setattr(
+        ur,
+        "_host_ips",
+        lambda host, port: [ipaddress.ip_address("93.184.216.34")],
+    )
+    ensure_public_resolution("http://example.com/")  # must not raise
+
+
+def test_ensure_public_resolution_blocks_private_rebinding(monkeypatch):
+    """First lookup passed validation; connection-time lookup went private."""
+    import backend.tools.url_reader as ur
+
+    monkeypatch.setattr(
+        ur,
+        "_host_ips",
+        lambda host, port: [ipaddress.ip_address("10.0.0.5")],
+    )
+    with pytest.raises(UrlReaderError):
+        ensure_public_resolution("http://evil.example.com/")
+

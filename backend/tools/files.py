@@ -46,6 +46,7 @@ def extract_text_from_bytes(data: bytes, filename: str = "", max_bytes: int = MA
     if suffix == ".pdf":
         try:
             import io
+
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
             pages_text: list[str] = []

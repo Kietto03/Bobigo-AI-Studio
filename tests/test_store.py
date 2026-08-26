@@ -97,3 +97,36 @@ def test_companion_messages_isolated_from_sessions():
         assert sessions[0]["messages"][0]["content"] == "s"
         assert len(companions[0]["messages"]) == 1
         assert companions[0]["messages"][0]["content"] == "c"
+
+
+def test_incremental_append_and_delete_session():
+    """POST .../messages appends without rewriting; DELETE removes the session."""
+    with TestClient(app) as client:
+        _reset_or_skip(client)
+        ok = client.put("/api/sessions", json=[
+            {"id": "t_inc", "title": "Inc",
+             "messages": [{"role": "user", "content": "a"}]}])
+        assert ok.status_code == 200
+
+        r = client.post("/api/t_inc/messages", json={
+            "role": "assistant", "content": "b",
+            "toolEvents": [{"name": "calculator"}],
+        })
+        assert r.status_code == 201
+        assert r.json()["seq"] == 1  # appended after the existing message
+
+        sessions = client.get("/api/sessions").json()
+        assert len(sessions) == 1 and sessions[0]["id"] == "t_inc"
+        assert len(sessions[0]["messages"]) == 2
+        # JSONB extras survive incremental insert too
+        assert sessions[0]["messages"][1]["toolEvents"] == [{"name": "calculator"}]
+
+        # Deleting by id removes the session AND its messages.
+        assert client.delete("/api/sessions/t_inc").status_code == 204
+        assert client.get("/api/sessions").json() == []
+
+
+def test_incremental_append_requires_content():
+    with TestClient(app) as client:
+        _reset_or_skip(client)
+        assert client.post("/api/missing/messages", json={"role": "user"}).status_code == 400

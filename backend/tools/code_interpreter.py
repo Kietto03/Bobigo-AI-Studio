@@ -9,7 +9,7 @@ import sys
 import tempfile
 import textwrap
 
-from backend.config import CODE_EXEC_TIMEOUT
+from backend.config import CODE_EXEC_TIMEOUT, SANDBOX_IMAGE, SANDBOX_RUNTIME
 
 _ALLOWED_MODULES = frozenset({
     "math",
@@ -103,6 +103,34 @@ def _assert_safe_ast(source: str) -> None:
                 raise CodeInterpreterError(f"không cho phép dùng '{node.id}'")
 
 
+def build_exec_cmd(
+    runner_path: str,
+    user_path: str,
+    *,
+    runtime: str | None = None,
+    image: str | None = None,
+) -> list[str]:
+    """Build the interpreter command for the configured sandbox runtime.
+
+    - "local"  (default): host python in isolated mode (-I).
+    - "docker" (opt-in): throwaway container, no network, tmp dir bind-mounted
+      read-write at /sandbox. Requires SANDBOX_IMAGE to be present locally.
+    """
+    rt = (runtime or SANDBOX_RUNTIME).lower()
+    if rt == "docker":
+        host_dir = os.path.dirname(os.path.abspath(user_path))
+        return [
+            "docker", "run", "--rm", "--network", "none",
+            "-v", f"{host_dir}:/sandbox",
+            "-w", "/sandbox",
+            "-e", "PYTHONDONTWRITEBYTECODE=1",
+            "-e", "PYTHONIOENCODING=utf-8",
+            image or SANDBOX_IMAGE,
+            "python", "-I", "/sandbox/runner.py", "/sandbox/user_code.py",
+        ]
+    return [sys.executable, "-I", runner_path, user_path]
+
+
 def run_python(code: str, timeout: int = CODE_EXEC_TIMEOUT) -> str:
     source = (code or "").strip()
     if not source:
@@ -125,7 +153,7 @@ def run_python(code: str, timeout: int = CODE_EXEC_TIMEOUT) -> str:
         }
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", runner_path, user_path],
+                build_exec_cmd(runner_path, user_path),
                 cwd=tmp,
                 env=env,
                 capture_output=True,

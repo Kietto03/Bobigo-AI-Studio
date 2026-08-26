@@ -2567,6 +2567,9 @@ body.light .send-btn.is-stop {
 .mcp-empty, .mcp-add-hint { font-size: 12.5px; color: var(--text-muted); }
 .mcp-add-hint { margin-top: 12px; padding: 11px 13px; border: 1px dashed var(--border-hover); border-radius: var(--radius-sm); }
 .mcp-add-hint code { font-family: var(--font-mono); color: var(--brand); }
+.mcp-reconnect-btn { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 10px; padding: 6px 12px; border-radius: var(--radius-xs); border: 1px solid var(--border); background: var(--bg-card); color: var(--text-main); font-size: 12.5px; cursor: pointer; transition: border-color .15s, color .15s; }
+.mcp-reconnect-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.mcp-reconnect-btn:disabled { opacity: .55; cursor: wait; }
 
 .about-brand { display: flex; align-items: center; gap: 13px; margin-bottom: 8px; }
 .about-logo { width: 46px; height: 46px; border-radius: var(--radius-sm); }

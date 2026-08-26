@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 
 from backend.config import BASE_DIR
-from backend.tools.files import FileToolError, list_workspace_files, read_workspace_file, resolve_in_workspace
+from backend.tools.files import (
+    FileToolError,
+    list_workspace_files,
+    read_workspace_file,
+    resolve_in_workspace,
+)
 
 
 def test_read_config():
@@ -51,12 +56,14 @@ def test_extract_text_from_bytes_text():
 
 def test_extract_text_from_pdf():
     import io
+
     from pypdf import PdfWriter
+
     from backend.tools.files import extract_text_from_bytes
 
     writer = PdfWriter()
-    page = writer.add_blank_page(width=100, height=100)
-    
+    writer.add_blank_page(width=100, height=100)
+
     stream = io.BytesIO()
     writer.write(stream)
     pdf_bytes = stream.getvalue()

@@ -20,18 +20,18 @@ class UrlReaderError(ValueError):
     pass
 
 
-def _host_ips(host: str, port: int) -> list[ipaddress._BaseAddress]:
+def _host_ips(host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise UrlReaderError(f"không resolve được host: {host}") from exc
-    ips: list[ipaddress._BaseAddress] = []
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for info in infos:
         ips.append(ipaddress.ip_address(info[4][0]))
     return ips
 
 
-def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return bool(
         ip.is_private
         or ip.is_loopback
@@ -62,6 +62,26 @@ def validate_url(url: str) -> str:
         if _is_blocked_ip(ip):
             raise UrlReaderError("host trỏ tới địa chỉ không công khai")
     return raw
+
+
+def ensure_public_resolution(url: str) -> None:
+    """Re-resolve the URL's host and refuse private/blocked addresses.
+
+    Used again right before a response body is consumed: a DNS-rebinding
+    attacker returns a public IP for the first lookup (passing validate_url)
+    and a private IP for the connection itself. Re-checking DNS after the
+    response headers arrive closes that window for practical purposes.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        raise UrlReaderError("URL thiếu host")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    for ip in _host_ips(host, port):
+        if _is_blocked_ip(ip):
+            raise UrlReaderError(
+                "DNS của host vừa chuyển sang địa chỉ không công khai (DNS rebinding?)"
+            )
 
 
 def html_to_text(raw: str) -> str:
@@ -97,6 +117,9 @@ async def read_url(
                     current = urljoin(current, location)
                     continue
                 resp.raise_for_status()
+                # TOCTOU guard: the host may have been re-resolved differently
+                # between validate_url() above and the actual connection.
+                ensure_public_resolution(current)
                 chunks: list[bytes] = []
                 total = 0
                 async for piece in resp.aiter_bytes():

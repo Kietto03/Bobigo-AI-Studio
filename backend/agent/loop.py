@@ -8,6 +8,7 @@ from typing import Any, Awaitable
 
 import httpx
 
+from backend.agent.context import trim_messages
 from backend.agent.parse import (
     extract_tool_calls_from_text,
     finalized_tool_calls,
@@ -16,12 +17,10 @@ from backend.agent.parse import (
     split_think_tags,
     strip_tool_markup,
 )
-from backend.agent.context import trim_messages
 from backend.config import (
     CONTEXT_WINDOW,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_SYSTEM_PROMPT_EN,
     LLM_BASE_URL,
     LLM_TIMEOUT,
     MAX_AGENT_ITERATIONS,
@@ -29,6 +28,7 @@ from backend.config import (
 )
 from backend.tools import execute_tool, tool_schemas
 from backend.tools.genfiles import extract_file_markers
+
 
 def _build_tool_hint(is_en: bool, mcp: Any = None) -> str:
     """Tool hint injected into the system prompt.
@@ -179,8 +179,19 @@ async def stream_agent(
     tool_runner: ToolRunner | None = None,
     http_client: httpx.AsyncClient | None = None,
     mcp: Any = None,
+    should_cancel: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     agent_tools = body.get("agent_tools", True) is not False
+
+    async def _cancelled() -> bool:
+        """True when the client went away — checked between iterations/chunks."""
+        if should_cancel is None:
+            return False
+        try:
+            return bool(await should_cancel())
+        except Exception:  # noqa: BLE001 — a broken checker must not kill the loop
+            return False
+
     messages = prepare_messages(
         list(body.get("messages") or []),
         agent_tools=agent_tools,
@@ -203,6 +214,9 @@ async def stream_agent(
     tools_disabled = False
     try:
         for iteration in range(MAX_AGENT_ITERATIONS):
+            if await _cancelled():
+                yield sse_done()
+                return
             reserve = int(body.get("max_tokens") or REPLY_RESERVE)
 
             acc_calls: dict[int, dict[str, Any]] = {}
@@ -241,6 +255,9 @@ async def stream_agent(
                 forwarded_any = False
                 try:
                     async for event in _llm(payload):
+                        if await _cancelled():
+                            yield sse_done()
+                            return
                         choice = (event.get("choices") or [{}])[0]
                         delta = choice.get("delta") or {}
                         if choice.get("finish_reason"):
@@ -291,6 +308,10 @@ async def stream_agent(
                 if full_reasoning or think:
                     assistant_msg["reasoning_content"] = full_reasoning or think
                 messages.append(assistant_msg)
+                # Don't kick off a long-running tool for a vanished client.
+                if await _cancelled():
+                    yield sse_done()
+                    return
                 events, tool_msgs = await _run_calls(calls, runner)
                 yield sse_pack(content_chunk(tool_events=events))
                 messages.extend(tool_msgs)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Optional
 
@@ -11,6 +12,8 @@ import asyncpg
 from backend.config import DATABASE_URL
 
 _SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
+
+log = logging.getLogger(__name__)
 
 
 async def _init_conn(con: asyncpg.Connection) -> None:
@@ -53,5 +56,5 @@ async def open_database() -> Optional[asyncpg.Pool]:
         await init_schema(pool)
         return pool
     except Exception as exc:  # noqa: BLE001 — never block startup on the DB
-        print(f"⚠️  Database unavailable, persistence disabled: {exc}")
+        log.warning("Database unavailable, persistence disabled: %s", exc)
         return None

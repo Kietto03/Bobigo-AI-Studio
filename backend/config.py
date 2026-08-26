@@ -38,6 +38,24 @@ MAX_REDIRECTS = 5
 DDG_URL = "https://html.duckduckgo.com/html/"
 MAX_READ_BYTES = 80_000
 MAX_LIST_ENTRIES = 200
+
+# Sandbox execution backend for code_interpreter: "local" (host python -I,
+# default) or "docker" (opt-in, runs each snippet in a throwaway
+# --network none container of SANDBOX_IMAGE).
+SANDBOX_RUNTIME = os.environ.get("SANDBOX_RUNTIME", "local").lower()
+SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "python:3.12-slim")
+
+# Uploads (/api/extract-file, /api/to-markdown). Enforced server-side so the
+# browser-side 25MB check is not the only line of defense.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+
+# Agent-generated files (generated/) are garbage-collected on startup after this
+# many hours so the folder cannot grow forever.
+GENERATED_TTL_HOURS = float(os.environ.get("GENERATED_TTL_HOURS", "72"))
+
+# Logging verbosity for the backend ("DEBUG"|"INFO"|"WARNING"|...).
+LOG_LEVEL = os.environ.get("BOBIGO_LOG_LEVEL", "INFO").upper()
+
 CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "8192"))
 REPLY_RESERVE = 2048
 TOOL_RESULT_CAP = 2500

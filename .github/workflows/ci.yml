@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Lockfile keeps CI identical to a working local environment;
+      # fall back to ranges if the lockfile is not yet committed.
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock.txt ]; then
+            pip install -r requirements.lock.txt
+          else
+            pip install -r requirements.txt
+          fi
+          pip install ruff pytest mypy
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Type-check (mypy)
+        run: mypy backend --ignore-missing-imports
+      - name: Tests (pytest)
+        run: pytest -q
+
+  web-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax-check frontend modules (excludes vendored libs)
+        run: |
+          find web -name '*.js' -not -path 'web/vendor/*' -print0 |
+            xargs -0 -n1 node --check
+      - name: Install test deps
+        run: npm install --no-fund --no-audit
+      - name: Frontend unit tests (vitest)
+        run: npx vitest run

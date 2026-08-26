@@ -7,6 +7,7 @@ export const HEALTH_URL = "/api/health";
 export const SEARCH_URL = "/api/websearch";
 export const COMPRESS_URL = "/api/compress";
 export const TOOLS_URL = "/api/tools";
+export const TOKENIZE_URL = "/api/tokenize";
 
 export async function performWebSearch(query, signal) {
     try {
@@ -53,4 +54,41 @@ export async function getToolsCatalog() {
     } catch (e) {
         return {};
     }
+}
+
+/**
+ * Exact token count from llama-server's tokenizer. Resolves to
+ * { count, exact } — with exact:false when the backend fell back to its
+ * len/4 heuristic (LLM unreachable). Returns null on any transport error.
+ */
+export async function postTokenize(text) {
+    try {
+        const res = await fetch(TOKENIZE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+        });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Durable best-effort write of ONE chat message to the server store.
+ * Fire-and-forget: resolves to {ok,seq} / null — never throws. The debounced
+ * bulk PUT remains the source of truth; this just makes a freshly streamed
+ * message survive a crash/reload even before the next full sync happens.
+ * Server returns 201; a 409/400 means the session doesn't exist yet (the
+ * bulk PUT will create it) — safe to ignore.
+ */
+export function postSessionMessage(sessionId, message) {
+    return fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(message),
+    })
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null);
 }

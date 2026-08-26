@@ -1,13 +1,22 @@
-"""Probe llama-server readiness and whether it was launched with --jinja."""
+"""Probe llama-server readiness and whether it serves a Jinja chat template.
+
+Jinja detection prefers llama-server's own ``GET /props`` (which includes the
+active ``chat_template`` when launched with ``--jinja``) and only falls back to
+scanning the process table when the API answer is inconclusive.
+"""
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from typing import Any
 
 import httpx
 
+from backend import __version__
 from backend.config import CONTEXT_WINDOW, DEFAULT_MODEL, LLM_BASE_URL, REPLY_RESERVE
+
+log = logging.getLogger(__name__)
 
 
 def _llama_cmdline() -> str:
@@ -26,30 +35,40 @@ def _llama_cmdline() -> str:
 
 
 def jinja_status() -> tuple[bool | None, str]:
+    """Fallback detection via the process table (macOS/Linux `ps`)."""
     cmd = _llama_cmdline()
     if not cmd:
         return None, ""
     return ("--jinja" in cmd.split()), cmd
 
 
+async def jinja_via_props(client: httpx.AsyncClient) -> bool | None:
+    """True/False from GET /props, or None when the API answer is inconclusive.
+
+    llama-server exposes the active chat template on /props only when it was
+    launched with --jinja. Older builds may omit the field entirely — in that
+    case we report "unknown" and let the caller fall back to `ps`.
+    """
+    try:
+        resp = await client.get(f"{LLM_BASE_URL.rstrip('/')}/props", timeout=2.0)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:  # ValueError: non-JSON body
+        log.debug("/props unavailable (%s); falling back to ps scan", exc)
+        return None
+    template = data.get("chat_template") if isinstance(data, dict) else None
+    return bool(isinstance(template, str) and template.strip())
+
+
 async def probe_llm(client: httpx.AsyncClient) -> dict[str, Any]:
     url = f"{LLM_BASE_URL.rstrip('/')}/v1/models"
-    try:
-        resp = await client.get(url, timeout=3.0)
-        ready = resp.status_code == 200
-        model = DEFAULT_MODEL
-        if ready:
-            data = resp.json()
-            items = data.get("data") or []
-            if items and isinstance(items[0], dict):
-                model = items[0].get("id") or model
-        jinja, cmdline = jinja_status()
-        if not ready:
-            message = "Mô hình chưa sẵn sàng (llama-server chưa đáp ứng)."
-        elif jinja is False:
-            message = "llama-server đang chạy nhưng thiếu --jinja. Agent tools có thể không gọi được."
-        else:
-            message = "Sẵn sàng"
+
+    async def _payload(*, ready: bool, model: str, message: str) -> dict[str, Any]:
+        # Prefer the API answer (/props); fall back to scanning `ps` output.
+        jinja = await jinja_via_props(client) if ready else None
+        if jinja is None:
+            jinja, _cmdline = jinja_status()
         return {
             "ok": ready and jinja is not False,
             "llm_ready": ready,
@@ -60,17 +79,26 @@ async def probe_llm(client: httpx.AsyncClient) -> dict[str, Any]:
             "llm_base_url": LLM_BASE_URL,
             "context_window": CONTEXT_WINDOW,
             "reply_reserve": REPLY_RESERVE,
+            "version": __version__,
         }
+
+    try:
+        resp = await client.get(url, timeout=3.0)
+        ready = resp.status_code == 200
+        model = DEFAULT_MODEL
+        if ready:
+            data = resp.json()
+            items = data.get("data") or []
+            if items and isinstance(items[0], dict):
+                model = items[0].get("id") or model
+        if not ready:
+            message = "Mô hình chưa sẵn sàng (llama-server chưa đáp ứng)."
+        else:
+            message = "Sẵn sàng"
+        return await _payload(ready=ready, model=model, message=message)
     except httpx.HTTPError:
-        jinja, _cmdline = jinja_status()
-        return {
-            "ok": False,
-            "llm_ready": False,
-            "model": DEFAULT_MODEL,
-            "jinja": jinja,
-            "jinja_known": jinja is not None,
-            "message": "Không kết nối được llama-server. Đợi model load hoặc chạy ./run.sh.",
-            "llm_base_url": LLM_BASE_URL,
-            "context_window": CONTEXT_WINDOW,
-            "reply_reserve": REPLY_RESERVE,
-        }
+        return await _payload(
+            ready=False,
+            model=DEFAULT_MODEL,
+            message="Không kết nối được llama-server. Đợi model load hoặc chạy ./run.sh.",
+        )

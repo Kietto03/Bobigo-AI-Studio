@@ -100,7 +100,7 @@
                         </div>
                     </div>
                     <!-- Quick Toggle Config Drawer -->
-                    <button class="btn-icon-sm" id="topbar-config-btn" title="Bật/Tắt cấu hình nhanh">
+                    <button class="btn-icon-sm" id="topbar-config-btn" title="Bật/Tắt cấu hình nhanh" aria-label="Bật/Tắt cấu hình nhanh">
                         <i class="fa-solid fa-sliders"></i>
                     </button>
                 </div>
@@ -206,7 +206,7 @@
                     <button class="settings-tab" data-settings-tab="about"><i class="fa-solid fa-circle-info"></i> <span data-i18n="setAbout">Giới thiệu</span></button>
                 </nav>
                 <div class="settings-main">
-                    <button class="btn-icon-sm settings-close" id="close-config-btn" title="Đóng"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="btn-icon-sm settings-close" id="close-config-btn" title="Đóng" aria-label="Đóng"><i class="fa-solid fa-xmark"></i></button>
                     <div class="settings-scroll">
 
                         <section class="settings-panel active" data-settings-panel="general">
@@ -312,6 +312,7 @@
                         <section class="settings-panel" data-settings-panel="mcp">
                             <h3 class="settings-h">MCP — Model Context Protocol</h3>
                             <p class="settings-desc" data-i18n="mcpHint">Kết nối server ngoài để nạp thêm công cụ vào agent.</p>
+                            <button type="button" id="mcp-reconnect" class="mcp-reconnect-btn"><i class="fa-solid fa-rotate-right"></i> <span data-i18n="mcpReconnect">Kết nối lại MCP</span></button>
                             <div id="mcp-servers-list" class="mcp-list"></div>
                             <div class="mcp-add-hint" data-i18n="mcpAddHint">Thêm server bằng cách tạo <code>mcp.json</code> ở gốc repo, rồi khởi động lại.</div>
                         </section>
@@ -345,7 +346,7 @@
         <div class="modal-card">
             <div class="modal-header">
                 <h3 id="companion-modal-title" data-i18n="editCompanion">Companion</h3>
-                <button type="button" class="btn-icon-sm" id="companion-modal-close"><i class="fa-solid fa-xmark"></i></button>
+                <button type="button" class="btn-icon-sm" id="companion-modal-close" title="Đóng" aria-label="Đóng"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="companion-modal-body"></div>
             <div class="modal-footer">
@@ -360,7 +361,7 @@
         <div class="modal-card">
             <div class="modal-header">
                 <h3 id="project-modal-title" data-i18n="editProject">Dự án</h3>
-                <button type="button" class="btn-icon-sm" id="project-modal-close"><i class="fa-solid fa-xmark"></i></button>
+                <button type="button" class="btn-icon-sm" id="project-modal-close" title="Đóng" aria-label="Đóng"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="project-modal-body"></div>
             <div class="modal-footer">

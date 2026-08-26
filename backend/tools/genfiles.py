@@ -9,14 +9,18 @@ the marker into ``event["files"]`` and strips it before the model sees the resul
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import re
+import time
 import uuid
 from pathlib import Path
 
-from backend.config import BASE_DIR
+from backend.config import BASE_DIR, GENERATED_TTL_HOURS
 
 GENERATED_DIR = Path(BASE_DIR) / "generated"
+
+log = logging.getLogger(__name__)
 
 # Unit-separator delimited marker — invisible, never valid in normal prose.
 _UNIT = "\x1f\x1f"
@@ -76,6 +80,29 @@ def save_generated_file(name: str, data: bytes) -> dict:
     ext = Path(safe).suffix.lower()
     mime = _MIME_OVERRIDES.get(ext) or mimetypes.guess_type(safe)[0] or "application/octet-stream"
     return {"id": fid, "name": safe, "mime": mime, "size": len(data), "kind": file_kind(safe)}
+
+
+def cleanup_generated(max_age_hours: float | None = None) -> int:
+    """Delete generated files older than the TTL. Returns how many were removed.
+
+    Called once at startup so ``generated/`` cannot grow forever. The TTL is
+    configurable via ``GENERATED_TTL_HOURS`` (default 72h).
+    """
+    hours = GENERATED_TTL_HOURS if max_age_hours is None else max_age_hours
+    if not GENERATED_DIR.exists() or hours <= 0:
+        return 0
+    cutoff = time.time() - hours * 3600
+    removed = 0
+    for path in GENERATED_DIR.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError as exc:  # best-effort sweep, keep going
+            log.warning("Could not remove generated file %s: %s", path.name, exc)
+    if removed:
+        log.info("Cleaned %d generated file(s) older than %.0fh", removed, hours)
+    return removed
 
 
 def resolve_generated(fid: str) -> Path | None:

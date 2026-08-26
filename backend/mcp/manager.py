@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -17,6 +18,8 @@ from backend.mcp.client import MCPError, StdioMCPClient
 
 MCP_CONFIG_PATH = os.path.join(BASE_DIR, "mcp.json")
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+log = logging.getLogger(__name__)
 
 
 def _sanitize(part: str) -> str:
@@ -78,6 +81,16 @@ class MCPManager:
     def has_servers(self) -> bool:
         return bool(self.clients) or bool(self.errors)
 
+    async def restart(self, config: dict[str, Any] | None = None) -> None:
+        """Stop every child process and start again from mcp.json.
+
+        Used by POST /api/mcp/restart so a crashed stdio server (or an edited
+        config) can be recovered without restarting the whole backend.
+        """
+        await self.aclose()
+        self.errors.clear()
+        await self.start(config)
+
     def list_tools(self) -> list[dict[str, Any]]:
         """Return OpenAI-compatible function schemas for all MCP tools."""
         schemas: list[dict[str, Any]] = []
@@ -95,6 +108,38 @@ class MCPManager:
     def is_mcp_tool(self, name: str) -> bool:
         return name in self._routes
 
+    async def _try_revive(self, server: str) -> None:
+        """Restart a single configured server (stale pipe / crashed child)."""
+        cfg = load_config().get(server)
+        if not isinstance(cfg, dict) or not cfg.get("command"):
+            return
+        log.info("Reviving MCP server '%s'", server)
+        old = self.clients.pop(server, None)
+        if old is not None:
+            try:
+                await old.aclose()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+            self._routes = {k: v for k, v in self._routes.items() if v[0] != server}
+        client = StdioMCPClient(
+            server, cfg["command"], cfg.get("args") or [], cfg.get("env") or {}
+        )
+        try:
+            await client.start()
+        except Exception as exc:  # noqa: BLE001
+            self.errors[server] = str(exc)
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self.errors.pop(server, None)
+        self.clients[server] = client
+        for tool in client.tools:
+            tname = tool.get("name")
+            if tname:
+                self._routes[namespaced_name(server, tname)] = (server, tname, tool)
+
     async def call(self, name: str, arguments: dict[str, Any]) -> str:
         route = self._routes.get(name)
         if not route:
@@ -102,10 +147,21 @@ class MCPManager:
         server, tool_name, _spec = route
         client = self.clients.get(server)
         if not client:
+            await self._try_revive(server)
+            client = self.clients.get(server)
+        if not client:
             return f"Lỗi: MCP server '{server}' không sẵn sàng"
         try:
             return await client.call_tool(tool_name, arguments or {})
         except Exception as exc:  # noqa: BLE001
+            # Dead pipe? Revive that one server and retry once.
+            await self._try_revive(server)
+            retry_client = self.clients.get(server)
+            if retry_client is not None:
+                try:
+                    return await retry_client.call_tool(tool_name, arguments or {})
+                except Exception as exc2:  # noqa: BLE001
+                    return f"Lỗi MCP {name}: {exc2}"
             return f"Lỗi MCP {name}: {exc}"
 
     def servers_status(self) -> list[dict[str, Any]]:

@@ -145,3 +145,52 @@ def test_extract_qwen_xml_tool_call():
     assert len(calls) == 1
     assert calls[0]["function"]["name"] == "calculator"
     assert "1+1" in calls[0]["function"]["arguments"]
+
+
+def test_stops_before_second_iteration_when_cancelled():
+    """Client disconnect must halt the loop between turns and before new tools."""
+
+    async def main():
+        state = {"tool_done": False}
+
+        async def cancel() -> bool:
+            # Simulates a client that vanished while the first tool ran.
+            return state["tool_done"]
+
+        llm_turns = []
+        tool_runs = []
+
+        async def llm(_payload):
+            llm_turns.append(1)
+            yield {
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "c-cancel",
+                        "function": {"name": "calculator", "arguments": "{\"expression\":\"1+1\"}"},
+                    }]}
+                }]
+            }
+            yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+
+        async def runner(name, _args):
+            tool_runs.append(name)
+            state["tool_done"] = True
+            return "2"
+
+        parts = []
+        async for chunk in stream_agent(
+            {"messages": [{"role": "user", "content": "loop"}]},
+            llm_stream=llm,
+            tool_runner=runner,
+            should_cancel=cancel,
+        ):
+            parts.append(chunk)
+
+        text = "".join(parts)
+        assert len(llm_turns) == 1      # second LLM turn never started
+        assert tool_runs == ["calculator"]
+        assert "[DONE]" in text
+        assert "giới hạn" not in text   # clean stop, not a cap message
+
+    asyncio.run(main())

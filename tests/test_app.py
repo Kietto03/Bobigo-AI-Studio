@@ -93,3 +93,64 @@ def test_tools_catalog_includes_convert_to_markdown():
         assert resp.status_code == 200
         names = [t["name"] for t in resp.json().get("builtin", [])]
         assert "convert_to_markdown" in names
+
+
+def test_upload_size_guard():
+    """Server-side cap rejects oversized uploads before reading the body."""
+    from types import SimpleNamespace
+
+    import backend.config as cfg
+    from backend.app import _upload_too_large
+
+    over = _upload_too_large(
+        SimpleNamespace(headers={"content-length": str(cfg.MAX_UPLOAD_BYTES + 1)})
+    )
+    assert over is not None
+    assert over.status_code == 413
+
+    # Missing or within-limit Content-Length passes through.
+    assert _upload_too_large(SimpleNamespace(headers={})) is None
+    assert (
+        _upload_too_large(SimpleNamespace(headers={"content-length": "1024"})) is None
+    )
+
+
+def test_tokenize_falls_back_to_heuristic_when_llm_down():
+    """Without llama-server, /api/tokenize returns a len/4 estimate (exact=False)."""
+    with TestClient(app) as client:
+        resp = client.post("/api/tokenize", json={"text": "xin chào thế giới"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["exact"] is False
+        assert data["count"] >= 1
+
+
+def test_tokenize_empty_text_counts_zero():
+    with TestClient(app) as client:
+        data = client.post("/api/tokenize", json={"text": ""}).json()
+        assert data == {"count": 0, "exact": False}
+
+
+def test_tokenize_requires_text_field():
+    with TestClient(app) as client:
+        assert client.post("/api/tokenize", json={}).status_code == 400
+        assert client.post("/api/tokenize", json={"text": 42}).status_code == 400
+
+
+def test_api_security_headers_present():
+    with TestClient(app) as client:
+        r = client.get("/api/tools")
+        assert r.headers.get("x-content-type-options") == "nosniff"
+        assert r.headers.get("x-frame-options") == "SAMEORIGIN"
+        assert r.headers.get("referrer-policy") == "no-referrer"
+
+
+def test_vendor_assets_cache_immutable_app_code_revalidates():
+    with TestClient(app) as client:
+        vendor = client.get("/vendor/marked.min.js")
+        assert vendor.status_code == 200
+        assert "immutable" in (vendor.headers.get("cache-control") or "")
+
+        shell = client.head("/")
+        assert shell.status_code == 200
+        assert "no-cache" in (shell.headers.get("cache-control") or "")

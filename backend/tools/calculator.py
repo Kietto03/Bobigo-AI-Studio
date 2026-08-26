@@ -84,10 +84,10 @@ def _eval(node: ast.AST) -> Any:
             raise CalculatorError("chia cho 0") from exc
 
     if isinstance(node, ast.UnaryOp):
-        op = _UNARY_OPS.get(type(node.op))
-        if op is None:
+        uop = _UNARY_OPS.get(type(node.op))
+        if uop is None:
             raise CalculatorError("toán tử một ngôi không được hỗ trợ")
-        return op(_eval(node.operand))
+        return uop(_eval(node.operand))  # type: ignore[operator]
 
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name):
@@ -99,7 +99,7 @@ def _eval(node: ast.AST) -> Any:
             raise CalculatorError("không hỗ trợ keyword argument")
         args = [_eval(a) for a in node.args]
         try:
-            return fn(*args)
+            return fn(*args)  # type: ignore[operator]
         except Exception as exc:
             raise CalculatorError(str(exc)) from exc
 

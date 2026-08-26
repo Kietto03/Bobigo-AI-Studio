@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["web/vendor", ".venv", "generated"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+# Long lines are tolerated in this codebase for now; re-enable once formatted.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend"]

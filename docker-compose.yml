@@ -24,5 +24,28 @@ services:
       timeout: 3s
       retries: 20
 
+  # ------------------------------------------------------------------
+  # Optional full-stack mode (docker compose --profile full up -d)
+  # Runs the FastAPI app in a container for non-macOS hosts; llama-server
+  # stays on the host (Metal/CUDA) and is reached via host.docker.internal.
+  #   LLM_BASE_URL=http://192.168.1.10:11434 docker compose --profile full up -d
+  # ------------------------------------------------------------------
+  app:
+    profiles: ["full"]
+    build: .
+    container_name: bobigo-app
+    restart: unless-stopped
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
+      DATABASE_URL: postgresql://bobigo:bobigo@db:5432/bobigo
+      CONTEXT_WINDOW: ${CONTEXT_WINDOW:-8192}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   bobigo_pgdata:

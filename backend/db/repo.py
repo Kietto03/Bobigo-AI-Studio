@@ -27,9 +27,9 @@ def _parse_ts(value: Any) -> Optional[datetime]:
         return None
 
 
-def _split_message(msg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _split_message(msg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Split a client message into (core columns, extra JSONB data)."""
-    core = {
+    core: dict[str, Any] = {
         "role": msg.get("role") or "user",
         "content": msg.get("content"),
         "text": msg.get("text"),
@@ -124,6 +124,43 @@ async def replace_sessions(pool: asyncpg.Pool, sessions: list[dict[str, Any]]) -
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
                         rows,
                     )
+
+
+async def append_session_message(pool: asyncpg.Pool, session_id: str, message: dict[str, Any]) -> int:
+    """Append one message to a session WITHOUT rewriting the whole thread.
+
+    Foundation for incremental persistence: unlike ``replace_sessions`` (which
+    deletes and re-inserts every message of every touched parent), this only
+    writes the new row and bumps the session's ``updated_at``.
+    Returns the seq index assigned to the new message.
+    """
+    core, data = _split_message(message)
+    async with pool.acquire() as con:
+        async with con.transaction():
+            seq = await con.fetchval(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM messages WHERE session_id = $1",
+                session_id,
+            )
+            await con.execute(
+                """INSERT INTO messages
+                   (session_id, companion_id, seq, role, content, text, reasoning, pinned, data)
+                   VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8)""",
+                session_id, seq, core["role"], core["content"], core["text"],
+                core["reasoning"], core["pinned"], data,
+            )
+            await con.execute(
+                "UPDATE sessions SET updated_at = now() WHERE id = $1", session_id
+            )
+    return int(seq)
+
+
+async def delete_session(pool: asyncpg.Pool, session_id: str) -> bool:
+    """Remove one session and its messages. True if the session existed."""
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await con.execute("DELETE FROM messages WHERE session_id = $1", session_id)
+            status = await con.execute("DELETE FROM sessions WHERE id = $1", session_id)
+    return str(status).strip() in {"DELETE 1"}
 
 
 # --------------------------------------------------------------------------- #

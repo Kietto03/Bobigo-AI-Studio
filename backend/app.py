@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -13,12 +14,27 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.agent.compress import summarize_messages
 from backend.agent.loop import stream_agent
-from backend.config import HOST, LLM_BASE_URL, LLM_TIMEOUT, PORT, WEB_DIR
+from backend.config import (
+    HOST,
+    LLM_BASE_URL,
+    LLM_TIMEOUT,
+    LOG_LEVEL,
+    MAX_UPLOAD_BYTES,
+    PORT,
+    WEB_DIR,
+)
 from backend.db import open_database, repo
 from backend.health import probe_llm
 from backend.mcp import MCPManager
 from backend.tools import SCHEMAS
+from backend.tools.genfiles import cleanup_generated
 from backend.tools.web_search import duckduckgo_search
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+)
+log = logging.getLogger("bobigo")
 
 
 @asynccontextmanager
@@ -28,11 +44,28 @@ async def lifespan(app: FastAPI):
         app.state.http = client
         # PostgreSQL pool (None if the DB is unavailable — app still serves).
         app.state.db = await open_database()
+        if app.state.db is not None:
+            log.info("PostgreSQL connected")
+        else:
+            log.warning("PostgreSQL unavailable — browser falls back to IndexedDB")
+
+        # Garbage-collect agent-generated files (best-effort, never fatal).
+        try:
+            removed = cleanup_generated()
+            if removed:
+                log.info("Startup cleanup removed %d generated file(s)", removed)
+        except Exception:  # noqa: BLE001
+            log.exception("generated/ cleanup failed")
+
         mcp = MCPManager()
         try:
             await mcp.start()
+            if mcp.clients:
+                log.info("MCP servers connected: %s", ", ".join(mcp.clients))
+            if mcp.errors:
+                log.warning("MCP servers failed to load: %s", mcp.errors)
         except Exception:  # noqa: BLE001 — MCP is optional, never block startup
-            pass
+            log.exception("MCP manager failed to start")
         app.state.mcp = mcp
         try:
             yield
@@ -47,12 +80,22 @@ app = FastAPI(title="Bobigo AI Studio", lifespan=lifespan)
 
 @app.middleware("http")
 async def _no_cache_static(request: Request, call_next):
-    """Force browsers to revalidate static assets so a code update is never
-    masked by a stale cached copy (this is a local single-user dev app)."""
+    """Caching + baseline security headers.
+
+    App code (html/js/css) must revalidate so updates are never masked by a
+    stale cache, but vendored third-party assets are pinned by commit — cache
+    them aggressively. API responses get standard hardening headers.
+    """
     response = await call_next(request)
     path = request.url.path
-    if path == "/" or path.endswith((".js", ".css", ".html")):
+    if path.startswith("/vendor/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path == "/" or path.endswith((".js", ".css", ".html")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    if path.startswith(("/api/", "/v1/")):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
     return response
 
 
@@ -60,7 +103,7 @@ def _upstream(path: str) -> str:
     return f"{LLM_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
 
 
-async def _proxy_stream(request: Request, path: str) -> StreamingResponse:
+async def _proxy_stream(request: Request, path: str) -> Response:
     client: httpx.AsyncClient = request.app.state.http
     body = await request.body()
     headers = {
@@ -144,6 +187,20 @@ async def mcp_servers(request: Request):
     return {"servers": mcp.servers_status() if mcp is not None else []}
 
 
+@app.post("/api/mcp/restart")
+async def mcp_restart(request: Request):
+    """Reconnect all configured MCP servers (recovers crashed children / config edits)."""
+    mcp = getattr(request.app.state, "mcp", None)
+    if mcp is None:
+        return {"servers": []}
+    await mcp.restart()
+    if mcp.clients:
+        log.info("MCP servers reconnected: %s", ", ".join(mcp.clients))
+    if mcp.errors:
+        log.warning("MCP servers failed after restart: %s", mcp.errors)
+    return {"servers": mcp.servers_status()}
+
+
 @app.post("/api/websearch")
 async def websearch(request: Request):
     try:
@@ -158,8 +215,22 @@ async def websearch(request: Request):
     return {"query": query, "results": results}
 
 
+def _upload_too_large(request: Request) -> JSONResponse | None:
+    """Reject oversized uploads before reading the body into memory."""
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"Tệp quá lớn (tối đa {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)"},
+            status_code=413,
+        )
+    return None
+
+
 @app.post("/api/extract-file")
 async def extract_file(request: Request):
+    too_large = _upload_too_large(request)
+    if too_large is not None:
+        return too_large
     content_type = request.headers.get("content-type", "")
     filename = "document"
     raw_bytes = b""
@@ -167,7 +238,7 @@ async def extract_file(request: Request):
     if "multipart/form-data" in content_type:
         form = await request.form()
         uploaded_file = form.get("file")
-        if not uploaded_file:
+        if not uploaded_file or isinstance(uploaded_file, str):
             return JSONResponse({"error": "Không tìm thấy tệp được tải lên"}, status_code=400)
         filename = getattr(uploaded_file, "filename", "document") or "document"
         raw_bytes = await uploaded_file.read()
@@ -183,8 +254,13 @@ async def extract_file(request: Request):
 
     if not raw_bytes:
         return JSONResponse({"error": "Tệp rỗng hoặc không có dữ liệu"}, status_code=400)
+    if len(raw_bytes) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"Tệp quá lớn (tối đa {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)"},
+            status_code=413,
+        )
 
-    from backend.tools.files import extract_text_from_bytes, FileToolError
+    from backend.tools.files import FileToolError, extract_text_from_bytes
     try:
         text = extract_text_from_bytes(raw_bytes, filename=filename, max_bytes=100_000)
         return {
@@ -201,20 +277,28 @@ async def extract_file(request: Request):
 @app.post("/api/to-markdown")
 async def to_markdown(request: Request):
     """Convert an uploaded document to Markdown and return it as a .md download."""
+    too_large = _upload_too_large(request)
+    if too_large is not None:
+        return too_large
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" not in content_type:
         return JSONResponse({"error": "Cần multipart/form-data với trường 'file'"}, status_code=400)
     form = await request.form()
     uploaded_file = form.get("file")
-    if not uploaded_file:
+    if not uploaded_file or isinstance(uploaded_file, str):
         return JSONResponse({"error": "Không tìm thấy tệp được tải lên"}, status_code=400)
     filename = getattr(uploaded_file, "filename", "document") or "document"
     raw_bytes = await uploaded_file.read()
     if not raw_bytes:
         return JSONResponse({"error": "Tệp rỗng hoặc không có dữ liệu"}, status_code=400)
+    if len(raw_bytes) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"Tệp quá lớn (tối đa {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)"},
+            status_code=413,
+        )
 
+    from backend.tools.files import FileToolError, extract_text_from_bytes
     from backend.tools.markdown_convert import convert_bytes_to_markdown
-    from backend.tools.files import extract_text_from_bytes, FileToolError
 
     try:
         # MarkItDown for rich formats; fall back to legacy extraction for plain
@@ -304,6 +388,64 @@ async def put_sessions(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/sessions/{session_id}/messages", status_code=201)
+async def post_session_message(session_id: str, request: Request):
+    """Append one message without rewriting the thread (incremental persistence).
+
+    The session row must already exist (the client creates it via the bulk PUT).
+    Returns the seq index assigned so the client can reconcile ordering.
+    """
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    if not isinstance(body, dict) or not (body.get("content") or body.get("text")):
+        return JSONResponse({"error": "message requires 'content' or 'text'"}, status_code=400)
+    seq = await repo.append_session_message(db, session_id, body)
+    return {"ok": True, "seq": seq}
+
+
+@app.delete("/api/sessions/{session_id}", status_code=204)
+async def delete_session_by_id(session_id: str, request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    await repo.delete_session(db, session_id)
+    return Response(status_code=204)
+
+
+@app.post("/api/tokenize")
+async def tokenize(request: Request):
+    """Exact token count via llama-server's /tokenize; heuristic fallback.
+
+    ``exact: false`` in the response means llama-server was unreachable and the
+    len/4 estimate was used — the same estimate the context trimmer relies on.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    text = data.get("text") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        return JSONResponse({"error": "body must be {\"text\": ...}"}, status_code=400)
+    client: httpx.AsyncClient = request.app.state.http
+    try:
+        resp = await client.post(
+            f"{LLM_BASE_URL.rstrip('/')}/tokenize",
+            json={"content": text},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        ids = resp.json().get("tokens") or []
+        return {"count": len(ids), "exact": True}
+    except (httpx.HTTPError, ValueError):
+        est = max(1, -(-len(text) // 4)) if text else 0  # ceil division
+        return {"count": est, "exact": False}
+
+
 @app.get("/api/companions")
 async def get_companions(request: Request):
     db, err = _db_or_503(request)
@@ -390,9 +532,8 @@ async def chat_completions(request: Request):
             body,
             http_client=request.app.state.http,
             mcp=getattr(request.app.state, "mcp", None),
+            should_cancel=request.is_disconnected,
         ):
-            if await request.is_disconnected():
-                break
             yield chunk
 
     return StreamingResponse(_agent_out(), media_type="text/event-stream")
@@ -407,6 +548,7 @@ def json_sse_error(message: str) -> bytes:
 async def serve_generated_file(file_id: str, download: int = 0):
     """Serve a file the agent generated (inline for preview, or as a download)."""
     from urllib.parse import quote
+
     from backend.tools.genfiles import resolve_generated
 
     path = resolve_generated(file_id)

@@ -6,8 +6,12 @@
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { formatFileSize, relativeTime, downloadFile, refineSearchQuery } from "./util.js";
 import { loadConfig, persistConfig } from "./config.js";
-import { API_URL, HEALTH_URL, SEARCH_URL, performWebSearch, postCompress, getToolsCatalog } from "./api.js";
-import { conversationTokens } from "./tokens.js";
+import { API_URL, performWebSearch, postCompress, postTokenize, postSessionMessage } from "./api.js";
+import { activateFocusTrap, deactivateFocusTrap } from "./features/focusTrap.js";
+import { createAppearance } from "./features/appearance.js";
+import { refreshSettingsCatalog, wireMcpReconnect } from "./features/toolsPanel.js";
+import { conversationTokens, estimateTokens } from "./tokens.js";
+import { createHealthController } from "./features/healthPanel.js";
 import { initContextMeter } from "./features/contextMeter.js";
 import { initMessageSearch } from "./features/messageSearch.js";
 import { loadPresets, savePresets, attachSlashCommands } from "./features/promptLibrary.js";
@@ -31,7 +35,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     const railConfigBtn = document.getElementById("rail-config-btn");
     const openSettingsBtn = document.getElementById("open-settings-btn");
     
-    const historyPanel = document.getElementById("history-panel");
     const configPanel = document.getElementById("config-panel");
     const closeConfigBtn = document.getElementById("close-config-btn");
     const topbarConfigBtn = document.getElementById("topbar-config-btn");
@@ -40,8 +43,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // History Panel Elements
     const historyList = document.getElementById("history-list");
-    const historySearchInput = document.getElementById("history-search-input");
-    const clearAllHistoryBtn = document.getElementById("clear-all-history-btn");
 
     // Topbar & Status
     const statusDot = document.getElementById("status-dot");
@@ -94,7 +95,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     // --------------------------------------------------------------------------
     // App State & Persistence
     // --------------------------------------------------------------------------
-    const MAX_ATTACH_BYTES = 80 * 1024;
 
     let sessions = loadSessions();
     let currentSessionId = null;
@@ -107,6 +107,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     let contextInfo = { window: 8192, reserve: 2048 }; // from /api/health
     let isCompressing = false;
     let contextMeter = null; // assigned once DOM refs exist (see init below)
+    const _durableQueue = []; // messages awaiting incremental server append
 
     // Icon/label per generated-file kind. Declared early (before initSessions →
     // renderCurrentSession runs) so restoring a chat with file cards on boot
@@ -124,20 +125,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         text:     { icon: "fa-file", label: "Văn bản" },
     };
 
-    // Themes: each = a base family (dark/light) + optional accent class.
-    // Declared here (before initTheme runs) to avoid a TDZ error at boot.
-    const THEMES = {
-        obsidian:  { family: "dark",  accent: null,              label: "Obsidian" },
-        daylight:  { family: "light", accent: null,              label: "Daylight" },
-        indigo:    { family: "dark",  accent: "theme-indigo",    label: "Indigo" },
-        evergreen: { family: "dark",  accent: "theme-evergreen", label: "Evergreen" },
-        amethyst:  { family: "dark",  accent: "theme-amethyst",  label: "Amethyst" },
-        porcelain: { family: "light", accent: "theme-porcelain", label: "Porcelain" },
-    };
-    const THEME_CLASSES = ["dark", "light", "theme-indigo", "theme-evergreen", "theme-amethyst", "theme-porcelain"];
-    let currentTheme = "obsidian";
-    const STYLE_CLASSES = ["style-pixel"]; // declared early — initStyle() runs before the style block
-    let currentStyle = "modern";
+    // Themes & style skins live in features/appearance.js — one controller owns
+    // the registry, body classes and localStorage persistence.
+    const appearance = createAppearance({ body, highlightStyle });
+    const { initTheme, setTheme, initStyle, setStyle } = appearance;
     let appMode = "chat"; // "chat" | "companion" | "project"
     let companions = (window.BobigoCompanions && BobigoCompanions.loadCompanions()) || [];
     let currentCompanionId = null;
@@ -292,10 +283,27 @@ document.addEventListener("DOMContentLoaded", async () => {
         return sp;
     }
 
+    let _ctxTokenTimer = 0;
     function updateContextMeter() {
         if (!contextMeter) return; // not yet initialized (early renders during boot)
         const session = getActiveSession();
         contextMeter.update((session && session.messages) || [], currentSystemPrompt());
+        // Refine the heuristic with the model's real tokenizer (debounced).
+        // Silently ignored when llama-server is down — heuristic already painted.
+        clearTimeout(_ctxTokenTimer);
+        _ctxTokenTimer = setTimeout(async () => {
+            try {
+                const s = getActiveSession();
+                const sys = currentSystemPrompt();
+                const blob = (sys ? sys + "\n" : "") +
+                    ((s && s.messages) || []).map((m) => m.content || "").join("\n");
+                if (!blob) return;
+                const res = await postTokenize(blob);
+                if (res && res.exact) {
+                    contextMeter.applyExact(res.count);
+                }
+            } catch (e) { /* meter keeps its heuristic value */ }
+        }, 700);
     }
 
     const COMPRESS_KEEP_RECENT = 4; // last N messages kept verbatim
@@ -471,118 +479,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
     }
 
-    const TOOL_NOTES = {
-        vi: {
-            web_search: "Tìm web qua DuckDuckGo · dữ kiện mới",
-            calculator: "Toán học AST an toàn (không eval)",
-            code_interpreter: "Python sandbox · timeout 15s",
-            url_reader: "Đọc trang web · chặn SSRF",
-            list_files: "Liệt kê file trong workspace",
-            read_file: "Đọc file text/PDF trong workspace",
-            convert_to_markdown: "Chuyển tài liệu (Word/Excel/PPT/PDF…) sang Markdown · MarkItDown",
-            create_file: "Tạo file text/code/markdown/CSV/HTML/SVG · xem trước & tải",
-            create_docx: "Tạo tài liệu Word (.docx)",
-            create_xlsx: "Tạo bảng tính Excel (.xlsx)",
-        },
-        en: {
-            web_search: "Web search via DuckDuckGo · fresh facts",
-            calculator: "Safe AST math (no eval)",
-            code_interpreter: "Python sandbox · 15s timeout",
-            url_reader: "Read web pages · blocks SSRF",
-            list_files: "List workspace files",
-            read_file: "Read workspace text/PDF files",
-            convert_to_markdown: "Convert docs (Word/Excel/PPT/PDF…) to Markdown · MarkItDown",
-            create_file: "Create text/code/markdown/CSV/HTML/SVG files · preview & download",
-            create_docx: "Create a Word document (.docx)",
-            create_xlsx: "Create an Excel spreadsheet (.xlsx)",
-        },
-    };
-
-    let settingsCatalogLoaded = false;
-    async function refreshSettingsCatalog() {
-        if (settingsCatalogLoaded) return; // fetch once per session
-        const toolsEl = document.getElementById("tools-builtin-list");
-        const mcpEl = document.getElementById("mcp-servers-list");
-        if (!toolsEl && !mcpEl) return;
-        const lang = config.language || "vi";
-        const notes = TOOL_NOTES[lang] || TOOL_NOTES.vi;
-        const data = await getToolsCatalog();
-        settingsCatalogLoaded = true;
-        if (toolsEl) {
-            toolsEl.innerHTML = (data.builtin || []).map((t) => `
-                <div class="tool-entry">
-                    <div class="tool-entry-name"><i class="fa-solid fa-wrench"></i> ${escapeHtml(t.name || "")}</div>
-                    <div class="tool-entry-desc">${escapeHtml(notes[t.name] || t.description || "")}</div>
-                </div>`).join("");
-        }
-        if (mcpEl) {
-            const servers = data.servers || [];
-            if (!servers.length) {
-                mcpEl.innerHTML = `<div class="mcp-empty">${lang === "en" ? "No MCP servers connected." : "Chưa kết nối MCP server nào."}</div>`;
-            } else {
-                mcpEl.innerHTML = servers.map((s) => `
-                    <div class="mcp-server">
-                        <div class="mcp-head">
-                            <span class="mcp-dot ${s.connected ? "ok" : "off"}"></span>
-                            <strong>${escapeHtml(s.name || "")}</strong>
-                            <span class="mcp-status">${s.connected ? ((s.tools || []).length + " tools") : escapeHtml(s.error || "offline")}</span>
-                        </div>
-                        ${(s.tools || []).length ? `<div class="mcp-tools">${(s.tools || []).map((t) => `<span class="chiptag">${escapeHtml(t.name || "")}</span>`).join("")}</div>` : ""}
-                    </div>`).join("");
-            }
-        }
-    }
+    wireMcpReconnect(config.language || "vi");
 
     // --------------------------------------------------------------------------
-    // Theme Switcher (multi-theme)
+    // Theme Switcher — see features/appearance.js
     // --------------------------------------------------------------------------
-    function normalizeTheme(name) {
-        if (name === "dark") return "obsidian";
-        if (name === "light") return "daylight";
-        return THEMES[name] ? name : "obsidian";
-    }
-
-    function initTheme() {
-        setTheme(normalizeTheme(localStorage.getItem("bobigo_theme") || "obsidian"));
-    }
-
-    function setTheme(name) {
-        const theme = THEMES[name] || THEMES.obsidian;
-        currentTheme = THEMES[name] ? name : "obsidian";
-        body.classList.remove(...THEME_CLASSES);
-        body.classList.add(theme.family);
-        if (theme.accent) body.classList.add(theme.accent);
-        if (highlightStyle) {
-            highlightStyle.href = theme.family === "light"
-                ? "vendor/hljs/github.min.css"
-                : "vendor/hljs/tokyo-night-dark.min.css";
-        }
-        localStorage.setItem("bobigo_theme", currentTheme);
-        document.querySelectorAll(".theme-swatch").forEach((s) => {
-            s.classList.toggle("active", s.getAttribute("data-theme") === currentTheme);
-        });
-    }
-
-    // --- Visual style (shape/typography skin, independent of theme) ---------
-    function initStyle() {
-        const saved = localStorage.getItem("bobigo_style") || "modern";
-        setStyle(saved);
-    }
-    function setStyle(name) {
-        currentStyle = (name === "pixel") ? "pixel" : "modern";
-        body.classList.remove(...STYLE_CLASSES);
-        if (currentStyle === "pixel") body.classList.add("style-pixel");
-        localStorage.setItem("bobigo_style", currentStyle);
-        document.querySelectorAll(".style-swatch").forEach((s) => {
-            s.classList.toggle("active", s.getAttribute("data-style") === currentStyle);
-        });
-    }
 
     // Optional quick sun/moon toggle (theme selection now lives in Settings).
     if (themeToggle) {
         themeToggle.addEventListener("click", () => {
-            const isLight = (THEMES[currentTheme] || THEMES.obsidian).family === "light";
-            setTheme(isLight ? "obsidian" : "daylight");
+            setTheme(appearance.isLightFamily() ? "obsidian" : "daylight");
         });
     }
 
@@ -633,7 +539,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         configPanel.classList.remove("hidden");
         document.body.classList.add("config-open");
         updateHealthSpeedDisplay();
-        if (typeof refreshSettingsCatalog === "function") refreshSettingsCatalog();
+        refreshSettingsCatalog(config.language || "vi");
     }
 
     function closeConfigDrawer() {
@@ -797,134 +703,46 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     // --------------------------------------------------------------------------
-    // Backend Health Check
+    // Backend Health Check — controller lives in features/healthPanel.js
     // --------------------------------------------------------------------------
     const statusLabel = document.getElementById("status-label");
     const statusBanner = document.getElementById("status-banner");
-    const healthCardLine = document.getElementById("health-card-line");
+
+    const health = createHealthController({
+        els: { statusLabel, statusDot, statusBanner },
+        getLanguage: () => config.language || "vi",
+        onApplied: (data, ready) => {
+            // Shared-state bridge: keep main.js closure vars in sync so all
+            // existing read sites (llmReady, currentModel, contextInfo…)
+            // continue to work unchanged.
+            llmReady = ready;
+            if (data && data.model) currentModel = data.model;
+            if (data && Number.isFinite(data.context_window)) contextInfo.window = data.context_window;
+            if (data && Number.isFinite(data.reply_reserve)) contextInfo.reserve = data.reply_reserve;
+            updateContextMeter();
+            if (!isGenerating) {
+                sendBtn.disabled = userInput.value.trim() === "" || !ready;
+            }
+            const i18n = window.BobigoI18n;
+            const lang = config.language || "vi";
+            userInput.placeholder = ready
+                ? (i18n ? i18n.t(lang, "inputPh") : "Nhắn cho Bobigo…")
+                : (lang === "en" ? "Waiting for model to be ready…" : "Đợi mô hình sẵn sàng…");
+        },
+    });
 
     function applyHealth(data) {
-        llmReady = !!(data && data.llm_ready);
-        const jinjaBad = data && data.jinja_known && data.jinja === false;
-        const label = statusLabel;
-        const dot = statusDot;
-        const i18n = window.BobigoI18n;
-        const lang = config.language || "vi";
-
-        if (!data || !data.llm_ready) {
-            if (dot) dot.className = "status-dot loading";
-            if (label) label.textContent = i18n ? i18n.t(lang, "loadingModel") : "Đang tải mô hình";
-            if (statusBanner) {
-                statusBanner.className = "status-banner";
-                statusBanner.textContent = (data && data.message) || (lang === "en" ? "Waiting for llama-server to load model into GPU…" : "Đang chờ llama-server nạp model vào GPU…");
-            }
-        } else if (jinjaBad) {
-            if (dot) dot.className = "status-dot online";
-            if (label) label.textContent = i18n ? i18n.t(lang, "ready") : "Sẵn sàng";
-            if (statusBanner) {
-                statusBanner.className = "status-banner hidden";
-                statusBanner.textContent = "";
-            }
-        } else {
-            if (dot) dot.className = "status-dot online";
-            if (label) label.textContent = i18n ? i18n.t(lang, "ready") : "Sẵn sàng";
-            if (statusBanner) {
-                statusBanner.className = "status-banner hidden";
-                statusBanner.textContent = "";
-            }
-        }
-        if (data && data.model) currentModel = data.model;
-        if (data && Number.isFinite(data.context_window)) contextInfo.window = data.context_window;
-        if (data && Number.isFinite(data.reply_reserve)) contextInfo.reserve = data.reply_reserve;
-        updateContextMeter();
-        const online = !!(data && data.llm_ready);
-        const healthCard = document.getElementById("health-card");
-        if (healthCard) {
-            healthCard.classList.toggle("ready", online);
-            healthCard.classList.toggle("loading", !online);
-        }
-        const hDot = document.getElementById("health-dot");
-        const hStatus = document.getElementById("health-status");
-        const hModel = document.getElementById("health-model");
-        const hSpeed = document.getElementById("health-speed");
-        const hLatency = document.getElementById("health-latency");
-        const hJinja = document.getElementById("health-jinja");
-        const hCtx = document.getElementById("health-ctx");
-        if (hDot) hDot.className = "health-dot " + (online ? (jinjaBad ? "warn" : "online") : "loading");
-        if (hStatus) hStatus.textContent = online ? (i18n ? i18n.t(lang, "ready") : "Sẵn sàng") : (i18n ? i18n.t(lang, "loadingModel") : "Đang tải mô hình");
-        if (hModel) { const m = (data && data.model) || "—"; hModel.textContent = m.length > 30 ? "…" + m.slice(-30) : m; hModel.title = m; }
-        if (hLatency) hLatency.textContent = (data && Number.isFinite(data.latency)) ? `${data.latency} ms` : "—";
-        if (hJinja) hJinja.textContent = data && data.jinja_known ? (data.jinja ? "✓" : "✗") : "?";
-        if (hCtx) hCtx.textContent = (data && data.context_window) ? data.context_window.toLocaleString() : "—";
-        updateHealthSpeedDisplay();
-        if (!isGenerating) {
-            sendBtn.disabled = userInput.value.trim() === "" || !llmReady;
-        }
-        userInput.placeholder = llmReady 
-            ? (i18n ? i18n.t(lang, "inputPh") : "Nhắn cho Bobigo…") 
-            : (lang === "en" ? "Waiting for model to be ready…" : "Đợi mô hình sẵn sàng…");
+        // Thin delegate — onApplied() inside the controller syncs llmReady,
+        // currentModel, contextInfo and repaints the context meter.
+        health.applyHealth(data);
     }
 
     function updateHealthSpeedDisplay(tps) {
-        const hSpeed = document.getElementById("health-speed");
-        if (!hSpeed) return;
-        const val = tps || localStorage.getItem("bobigo_last_tps");
-        if (val && parseFloat(val) > 0) {
-            hSpeed.textContent = `${val} tokens/s`;
-            hSpeed.title = `${val} tokens/s`;
-        } else {
-            hSpeed.textContent = "—";
-        }
+        health.updateHealthSpeedDisplay(tps);
     }
 
     async function checkHealth() {
-        const lang = config.language || "vi";
-        const t0 = performance.now();
-        try {
-            const res = await fetch(HEALTH_URL, { cache: "no-store" });
-            const latency = Math.round(performance.now() - t0);
-            if (res.ok) {
-                const data = await res.json();
-                if (data && typeof data.llm_ready === "boolean") {
-                    data.latency = latency;
-                    applyHealth(data);
-                    return;
-                }
-            }
-        } catch (e) {
-            /* fall through to /v1/models */
-        }
-
-        try {
-            const t1 = performance.now();
-            const res = await fetch("/v1/models", { cache: "no-store" });
-            const latency = Math.round(performance.now() - t1);
-            if (res.ok) {
-                const data = await res.json();
-                const model = (data.data && data.data[0] && data.data[0].id)
-                    || (data.models && data.models[0] && (data.models[0].name || data.models[0].model))
-                    || "local";
-                applyHealth({
-                    llm_ready: true,
-                    jinja: null,
-                    jinja_known: false,
-                    model,
-                    latency,
-                    message: lang === "en" ? "Ready" : "Sẵn sàng",
-                });
-                return;
-            }
-        } catch (e) {
-            /* model still down */
-        }
-
-        applyHealth({
-            llm_ready: false,
-            jinja: null,
-            jinja_known: false,
-            model: null,
-            message: lang === "en" ? "Model not ready. Please wait for llama-server or run ./run.sh." : "Mô hình chưa sẵn sàng. Đợi llama-server hoặc chạy lại ./run.sh (dùng .venv).",
-        });
+        await health.checkHealth();
     }
 
     // --------------------------------------------------------------------------
@@ -1036,6 +854,20 @@ document.addEventListener("DOMContentLoaded", async () => {
             return;
         }
         persistSessions();
+        // Incremental durability insurance: push just-appended message(s) via
+        // the per-message endpoint so a crash before the next bulk sync still
+        // leaves them on the server. Fire-and-forget; reconcile is unchanged.
+        if (window.BobigoDB && window.BobigoDB.isOnline && _durableQueue.length) {
+            for (const { sessionId, message } of _durableQueue.splice(0)) {
+                postSessionMessage(sessionId, message);
+            }
+        }
+    }
+
+    /** Queue a message for durable server-side append on the next save. */
+    function queueDurableMessage(sessionId, message) {
+        if (appMode === "companion") return; // companions use their own store
+        _durableQueue.push({ sessionId, message });
     }
 
     function initSessions() {
@@ -1085,15 +917,6 @@ document.addEventListener("DOMContentLoaded", async () => {
             localStorage.setItem("bobigo_companions_seeded", "1");
         }
         currentCompanionId = companions.length ? companions[0].id : null;
-    }
-
-    function createCompanion() {
-        if (!window.BobigoCompanions) return null;
-        const c = BobigoCompanions.newCompanion({ language: config.language });
-        companions.unshift(c);
-        currentCompanionId = c.id;
-        saveSessions();
-        return c;
     }
 
     function initProjects() {
@@ -1406,7 +1229,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     projectModal?.addEventListener("click", (e) => { if (e.target === projectModal) closeProjectEditor(); });
     document.getElementById("project-save-btn")?.addEventListener("click", saveProjectEditor);
     document.getElementById("project-delete-btn")?.addEventListener("click", deleteProjectEditor);
-    function closeProjectEditor() { projectModal?.classList.add("hidden"); }
+    function closeProjectEditor() {
+        projectModal?.classList.add("hidden");
+        deactivateFocusTrap();
+    }
 
     function openProjectEditor(id) {
         if (!window.BobigoProjects || !projectModal || !projectBody) return;
@@ -1459,6 +1285,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
         projectModal._draft = { p, isNew, getKnowledge: () => knowledge };
         projectModal.classList.remove("hidden");
+        activateFocusTrap(projectModal);
         const delBtn = document.getElementById("project-delete-btn");
         if (delBtn) delBtn.style.display = isNew ? "none" : "";
     }
@@ -1557,7 +1384,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // --- Chat item actions: menu, rename, pin, add-to-project --------------
     function closeChatMenu() { document.querySelectorAll(".chat-menu").forEach((m) => m.remove()); }
 
-    function openChatMenu(anchor, session, filterQuery) {
+    function openChatMenu(anchor, session, _filterQuery) {
         closeChatMenu();
         const i18n = window.BobigoI18n; const lang = config.language || "vi";
         const t = (k, f) => (i18n ? i18n.t(lang, k) : f);
@@ -2279,12 +2106,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
     });
 
-    async function handleRegenerate() {
-        const session = getActiveSession();
-        if (!session || !session.messages || !session.messages.length) return;
-        handleRegenerateFromIndex(session.messages.length - 1);
-    }
-
     async function handleSendMessage(opts) {
         const regen = !!(opts && opts.regenerate);
         // Edits and regenerations carry their text in opts.text; only a fresh
@@ -2370,6 +2191,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         };
         if (!regen) {
             targetSession.messages.push(userMsg);
+            queueDurableMessage(targetSessionId, userMsg);
             saveSessions();
             if (currentSessionId === targetSessionId) {
                 appendMessageUI("user", fullPromptContent, "", null, null, attachmentsMeta, cleanPrompt, targetSession.messages.length - 1);
@@ -2418,6 +2240,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             isStreaming: true,
         };
         targetSession.messages.push(assistantMsgObj);
+        queueDurableMessage(targetSessionId, assistantMsgObj);
         saveSessions();
 
         activeGenerations.set(targetSessionId, {
@@ -2625,6 +2448,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             assistantMsgObj.content = fullAssistantContent;
             assistantMsgObj.reasoning = fullReasoning;
             assistantMsgObj.toolEvents = toolEvents;
+            queueDurableMessage(targetSessionId, assistantMsgObj);
 
             // Regeneration: keep prior answers as switchable variants for comparison.
             if (opts && Array.isArray(opts.priorVariants) && opts.priorVariants.length) {
@@ -3094,7 +2918,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("companion-save-btn")?.addEventListener("click", saveCompanionEditor);
     document.getElementById("companion-delete-btn")?.addEventListener("click", deleteCompanionEditor);
 
-    function closeCompanionEditor() { companionModal?.classList.add("hidden"); }
+    function closeCompanionEditor() {
+        companionModal?.classList.add("hidden");
+        deactivateFocusTrap();
+    }
     function cval(id) { return (document.getElementById(id)?.value || "").trim(); }
 
     function openCompanionEditor(id) {
@@ -3187,6 +3014,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         companionModal._draft = { c, isNew, getKnowledge: () => knowledge, getAvatar: () => avatar };
         companionModal.classList.remove("hidden");
+        activateFocusTrap(companionModal);
         const delBtn = document.getElementById("companion-delete-btn");
         if (delBtn) delBtn.style.display = isNew ? "none" : "";
     }
