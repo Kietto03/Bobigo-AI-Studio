@@ -31,7 +31,7 @@ worker_binary() {
 
 fix_network() {
     say "Cố định IP $HOST_IP trên cổng Thunderbolt..."
-    local tb_service="EXO Thunderbolt 1"
+    local tb_service="Thunderbolt Bridge"
     networksetup -setmanual "$tb_service" "$HOST_IP" 255.255.255.0 2>/dev/null || true
     networksetup -setnetworkserviceenabled "$tb_service" off 2>/dev/null || true
     networksetup -setnetworkserviceenabled "$tb_service" on 2>/dev/null || true
@@ -160,6 +160,11 @@ status_host() {
     if curl -m 2 -sf "http://127.0.0.1:52415/v1/models" >/dev/null 2>&1; then
         echo "✅ EXO API (Port 52415): READY"
     fi
+    if curl -m 2 -sf "http://${WORKER_IP}:${LLM_PORT}/v1/models" >/dev/null 2>&1; then
+        echo "✅ Worker Speculative MLX API ($WORKER_IP:$LLM_PORT): READY"
+    else
+        echo "ℹ️  Worker Speculative MLX API ($WORKER_IP:$LLM_PORT): Chưa bật"
+    fi
 
     echo "--- 3. Web & API Health ---"
     if curl -m 3 -sf "http://127.0.0.1:8000/api/health" >/dev/null 2>&1; then
@@ -167,6 +172,67 @@ status_host() {
     else
         echo "⚠️ FastAPI Backend chưa ready"
     fi
+}
+
+start_speculative() {
+    say "=== Khởi động Chế độ Speculative Decoding (Draft 0.8B + Target 27B) ==="
+    if ! ifconfig | grep -q "$HOST_IP"; then
+        fix_network
+    fi
+    if ! ping -c 1 -W 1000 "$WORKER_IP" >/dev/null 2>&1; then
+        die "Không ping được Worker qua cáp Thunderbolt ($WORKER_IP). Hãy kiểm tra cáp."
+    fi
+
+    say "Dừng llama-server và EXO trên Host để giải phóng RAM tối đa..."
+    stop_host
+    stop_exo
+    sleep 1
+
+    say "Kiểm tra Worker Speculative Engine tại http://$WORKER_IP:$LLM_PORT/v1/models..."
+    local ready=0
+    for i in $(seq 1 10); do
+        if curl -sf "http://$WORKER_IP:$LLM_PORT/v1/models" >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ "$ready" -ne 1 ]]; then
+        echo "⚠️ Chưa thấy Worker Speculative Engine phản hồi trên http://$WORKER_IP:$LLM_PORT."
+        echo "👉 Hãy đảm bảo trên MÁY WORKER bạn đã chạy:"
+        echo "   cd ~/Code/Chatbot_v1 && git pull"
+        echo "   ./scripts/sync_draft_to_worker.sh"
+        echo "   ./scripts/start_speculative_worker.sh"
+        echo "⏳ Đang đợi Worker sẵn sàng..."
+        while ! curl -sf "http://$WORKER_IP:$LLM_PORT/v1/models" >/dev/null 2>&1; do
+            sleep 2
+        done
+    fi
+    echo "✅ Worker Speculative Engine ĐÃ SẴN SÀNG!"
+
+    say "Khởi động FastAPI Backend trên Host kết nối sang Worker ($WORKER_IP:$LLM_PORT)..."
+    pkill -f 'python.*server.py' 2>/dev/null || true
+    export LLM_BASE_URL="http://$WORKER_IP:$LLM_PORT"
+    export DEFAULT_MODEL="Qwen3.8-27B-Uncensored"
+    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/server.py" > "$PROJECT_DIR/backend-speculative.log" 2>&1 &
+    sleep 2
+
+    if curl -m 3 -sf "http://127.0.0.1:8000/api/health" >/dev/null 2>&1; then
+        echo "========================================================"
+        echo "🎉 BOBIGO AI STUDIO ĐÃ HOẠT ĐỘNG VỚI SPECULATIVE DECODING!"
+        echo "   Engine: Worker ($WORKER_IP:$LLM_PORT) [Draft 0.8B + Target 27B]"
+        echo "   Studio: http://localhost:8000"
+        echo "   Tốc độ dự kiến: 30 - 45 TPS (Gấp 8x so với EXO Pipeline)"
+        echo "========================================================"
+    else
+        echo "⚠️ Backend đang khởi động, xem log: tail -f $PROJECT_DIR/backend-speculative.log"
+    fi
+}
+
+stop_speculative() {
+    pkill -f 'python.*server.py' 2>/dev/null || true
+    echo "✅ Đã dừng Bobigo Backend Speculative mode"
 }
 
 start_host() {
@@ -243,19 +309,21 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Worker Mac:
-  install-worker    Cài launchd RPC worker và tự khởi động (llama.cpp)
-  uninstall-worker  Gỡ launchd RPC worker
-  status-worker     Kiểm tra launchd và port RPC
-  start-exo-worker  Chạy EXO worker node (MLX)
+  install-worker       Cài launchd RPC worker và tự khởi động (llama.cpp)
+  uninstall-worker     Gỡ launchd RPC worker
+  status-worker        Kiểm tra launchd và port RPC
+  start-exo-worker     Chạy EXO worker node (MLX)
 
 Host Mac:
-  connect           Kiểm tra Worker, khởi động llama-server với --rpc (Qwen 35B)
-  start-exo         Khởi động cụm phân tán EXO (Qwen 3.8 MLX)
-  stop-exo          Dừng cụm EXO
-  restart           Dừng, sửa mạng và khởi động lại toàn bộ Host (llama.cpp)
-  status            Kiểm tra toàn diện Mạng, RPC, EXO, llama-server và Web API
-  fix-network       Cố định lại IP 192.168.100.1 trên cáp Thunderbolt
-  stop-host         Dừng llama-server & supervisor
+  start-speculative    [Khuyên Dùng B1] Kết nối Worker Speculative Decoding (30-45 TPS)
+  stop-speculative     Dừng kết nối Speculative
+  connect              Kiểm tra Worker, khởi động llama-server với --rpc (Qwen 35B)
+  start-exo            Khởi động cụm phân tán EXO (Qwen 3.8 MLX)
+  stop-exo             Dừng cụm EXO
+  restart              Dừng, sửa mạng và khởi động lại toàn bộ Host (llama.cpp)
+  status               Kiểm tra toàn diện Mạng, RPC, Speculative, EXO, llama-server và Web API
+  fix-network          Cố định lại IP 192.168.100.1 trên cáp Thunderbolt
+  stop-host            Dừng llama-server & supervisor
 
 Environment:
   MODEL_PATH=/path/model.gguf
@@ -268,6 +336,8 @@ case "${1:-}" in
     install-worker) install_worker ;;
     uninstall-worker) uninstall_worker ;;
     status-worker) status_worker ;;
+    start-speculative) start_speculative ;;
+    stop-speculative) stop_speculative ;;
     connect|start-host) start_host ;;
     start-exo) start_exo ;;
     stop-exo) stop_exo ;;

@@ -18,7 +18,7 @@ echo "========================================================"
 # Check network
 if ! ifconfig | grep -q "$HOST_IP"; then
     echo "🌐 Đang kích hoạt IP $HOST_IP trên cáp Thunderbolt..."
-    networksetup -setmanual "EXO Thunderbolt 1" "$HOST_IP" 255.255.255.0 2>/dev/null || true
+    networksetup -setmanual "Thunderbolt Bridge" "$HOST_IP" 255.255.255.0 2>/dev/null || true
 fi
 
 # Ensure symlink in ~/.exo/models
@@ -42,5 +42,6 @@ fi
 WORKER_IP="${WORKER_IP:-192.168.100.2}"
 LIBP2P_PORT="${EXO_LIBP2P_PORT:-52416}"
 
-echo "🚀 Đang khởi động EXO (Peer Worker: $WORKER_IP:$LIBP2P_PORT)..."
-exec "$EXO_BIN" --api-port "$API_PORT" --libp2p-port "$LIBP2P_PORT" --bootstrap-peers "${WORKER_IP}:${LIBP2P_PORT}" "$@"
+echo "🚀 Đang khởi động EXO Master (Peer Worker: $WORKER_IP:$LIBP2P_PORT)..."
+exec "$EXO_BIN" -m --api-port "$API_PORT" --libp2p-port "$LIBP2P_PORT" --bootstrap-peers "${WORKER_IP}:${LIBP2P_PORT}" "$@"
+
