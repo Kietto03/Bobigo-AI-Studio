@@ -17,18 +17,18 @@ export const THEME_CLASSES = ["dark", "light", "theme-indigo", "theme-evergreen"
 export const STYLE_CLASSES = ["style-pixel"];
 
 export function createAppearance({ body, highlightStyle }) {
-    let currentTheme = "obsidian";
+    let currentTheme = "daylight";
     let currentStyle = "modern";
 
     function normalizeTheme(name) {
         if (name === "dark") return "obsidian";
         if (name === "light") return "daylight";
-        return THEMES[name] ? name : "obsidian";
+        return THEMES[name] ? name : "daylight";
     }
 
     function setTheme(name) {
-        const theme = THEMES[name] || THEMES.obsidian;
-        currentTheme = THEMES[name] ? name : "obsidian";
+        const theme = THEMES[name] || THEMES.daylight;
+        currentTheme = THEMES[name] ? name : "daylight";
         body.classList.remove(...THEME_CLASSES);
         body.classList.add(theme.family);
         if (theme.accent) body.classList.add(theme.accent);
@@ -44,7 +44,7 @@ export function createAppearance({ body, highlightStyle }) {
     }
 
     function initTheme() {
-        setTheme(normalizeTheme(localStorage.getItem("bobigo_theme") || "obsidian"));
+        setTheme(normalizeTheme(localStorage.getItem("bobigo_theme") || "daylight"));
     }
 
     function setStyle(name) {

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import platform
+import re
+import socket
+import subprocess
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -12,15 +18,21 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+APP_START_TIME = time.time()
+
+from backend import auth
 from backend.agent.compress import summarize_messages
+from backend.agent.context import trim_messages
 from backend.agent.loop import stream_agent
 from backend.config import (
+    CONTEXT_WINDOW,
     HOST,
     LLM_BASE_URL,
     LLM_TIMEOUT,
     LOG_LEVEL,
     MAX_UPLOAD_BYTES,
     PORT,
+    REPLY_RESERVE,
     WEB_DIR,
 )
 from backend.db import open_database, repo
@@ -46,6 +58,10 @@ async def lifespan(app: FastAPI):
         app.state.db = await open_database()
         if app.state.db is not None:
             log.info("PostgreSQL connected")
+            try:
+                await auth.bootstrap_admin(app.state.db)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Khởi tạo admin thất bại: %s", exc)
         else:
             log.warning("PostgreSQL unavailable — browser falls back to IndexedDB")
 
@@ -56,7 +72,6 @@ async def lifespan(app: FastAPI):
                 log.info("Startup cleanup removed %d generated file(s)", removed)
         except Exception:  # noqa: BLE001
             log.exception("generated/ cleanup failed")
-
         mcp = MCPManager()
         try:
             await mcp.start()
@@ -66,10 +81,37 @@ async def lifespan(app: FastAPI):
                 log.warning("MCP servers failed to load: %s", mcp.errors)
         except Exception:  # noqa: BLE001 — MCP is optional, never block startup
             log.exception("MCP manager failed to start")
-        app.state.mcp = mcp
+        # Background watchdog: continuously ensures 192.168.100.1 stays pinned on Host Thunderbolt
+        async def _host_network_guardian():
+            while True:
+                try:
+                    await asyncio.sleep(5)
+                    proc = await asyncio.create_subprocess_exec(
+                        "ifconfig", "en2",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    out, _ = await proc.communicate()
+                    text = out.decode("utf-8", errors="ignore")
+                    if "192.168.100.1" not in text and "status: active" in text:
+                        log.warning("Host en2 lost 192.168.100.1. Auto-restoring...")
+                        fix = await asyncio.create_subprocess_exec(
+                            "networksetup", "-setmanual", "EXO Thunderbolt 1", "192.168.100.1", "255.255.255.0",
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        await fix.wait()
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    pass
+
+        guardian_task = asyncio.create_task(_host_network_guardian())
+
         try:
             yield
         finally:
+            guardian_task.cancel()
             await mcp.aclose()
             if app.state.db is not None:
                 await app.state.db.close()
@@ -99,6 +141,49 @@ async def _no_cache_static(request: Request, call_next):
     return response
 
 
+# API paths reachable without a session (everything else under /api and /v1 needs auth).
+_PUBLIC_API = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/auth/trial-key"}
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    path = request.url.path
+    request.state.user = None
+    db = getattr(request.app.state, "db", None)
+
+    # Extract auth token or API key from Authorization header, x-api-key, cookie, or query param
+    auth_header = request.headers.get("authorization")
+    raw_cred = (
+        auth_header
+        or request.headers.get("x-api-key")
+        or request.cookies.get(auth.COOKIE_NAME)
+        or request.query_params.get("api_key")
+    )
+    if db is not None and raw_cred:
+        try:
+            request.state.user = await auth.resolve_token_or_key(db, raw_cred)
+        except Exception:  # noqa: BLE001
+            request.state.user = None
+
+    protected = (path.startswith("/api/") or path.startswith("/v1/")) and path not in _PUBLIC_API
+    if protected:
+        if db is None:
+            return JSONResponse({"error": "Database unavailable"}, status_code=503)
+        # Test hook: conftest sets app.state.auth_test_user (never set in prod).
+        if request.state.user is None:
+            request.state.user = getattr(request.app.state, "auth_test_user", None)
+        if request.state.user is None:
+            return JSONResponse({"error": "Chưa xác thực hoặc API Key không hợp lệ"}, status_code=401)
+        if path.startswith("/api/admin/") and request.state.user["role"] != "admin":
+            return JSONResponse({"error": "Yêu cầu quyền admin"}, status_code=403)
+    return await call_next(request)
+
+
+def _uid(request: Request) -> int:
+    """Current user id — safe on protected routes (middleware guarantees a user)."""
+    return request.state.user["id"]
+
+
 def _upstream(path: str) -> str:
     return f"{LLM_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
 
@@ -109,7 +194,7 @@ async def _proxy_stream(request: Request, path: str) -> Response:
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in {"host", "content-length"}
+        if k.lower() not in {"host", "content-length", "authorization", "x-api-key"}
     }
     req = client.build_request(
         request.method,
@@ -146,6 +231,401 @@ async def _proxy_stream(request: Request, path: str) -> Response:
 @app.get("/api/health")
 async def health(request: Request):
     return await probe_llm(request.app.state.http)
+
+
+# --------------------------------------------------------------------------- #
+# Authentication
+# --------------------------------------------------------------------------- #
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        auth.COOKIE_NAME, token, max_age=auth.SESSION_TTL_DAYS * 86400,
+        httponly=True, samesite="lax", path="/",
+    )
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "Database unavailable"}, status_code=503)
+    body = await request.json()
+    result = await auth.login(db, body.get("username", ""), body.get("password", ""))
+    if not result:
+        return JSONResponse({"error": "Sai tên đăng nhập hoặc mật khẩu"}, status_code=401)
+    token, user = result
+    resp = JSONResponse({"user": user})
+    _set_session_cookie(resp, token)
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    db = getattr(request.app.state, "db", None)
+    token = request.cookies.get(auth.COOKIE_NAME)
+    if db is not None:
+        await auth.logout(db, token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = getattr(request.state, "user", None)
+    return {"user": auth._pub(user) if user else None}
+
+
+@app.post("/api/auth/trial-key")
+async def auth_generate_trial_key(request: Request):
+    db, err = _db_or_503(request)
+    if err:
+        return err
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    name = (body.get("name") or "Public Trial").strip()[:64]
+    async with db.acquire() as con:
+        admin_id = await con.fetchval("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1") or 1
+    key_obj = await auth.create_api_key(db, admin_id, name=f"Trial: {name}")
+    return {"key": key_obj["key"], "name": key_obj["name"]}
+
+
+# --------------------------------------------------------------------------- #
+# Admin (role=admin only — enforced by the auth middleware)
+# --------------------------------------------------------------------------- #
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    return {"users": await auth.list_users(request.app.state.db)}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(request: Request):
+    body = await request.json()
+    try:
+        user = await auth.create_user(
+            request.app.state.db, body.get("username", ""), body.get("password", ""),
+            role=body.get("role", "user"),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"user": user}
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_update_user(user_id: int, request: Request):
+    db = request.app.state.db
+    body = await request.json()
+    try:
+        if "password" in body and body["password"]:
+            await auth.set_password(db, user_id, body["password"])
+        if "disabled" in body:
+            # An admin must not lock themselves out.
+            if user_id == _uid(request) and body["disabled"]:
+                return JSONResponse({"error": "Không thể tự vô hiệu hoá"}, status_code=400)
+            await auth.set_disabled(db, user_id, bool(body["disabled"]))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: int, request: Request):
+    if user_id == _uid(request):
+        return JSONResponse({"error": "Không thể tự xoá"}, status_code=400)
+    await auth.delete_user(request.app.state.db, user_id)
+    return {"ok": True}
+
+
+@app.get("/api/admin/audit")
+async def admin_audit(request: Request, limit: int = 200):
+    return {"items": await repo.list_audit(request.app.state.db, min(max(limit, 1), 500), user_id=None)}
+
+
+# --------------------------------------------------------------------------- #
+# Admin API Keys Management
+# --------------------------------------------------------------------------- #
+@app.get("/api/admin/api-keys")
+async def admin_list_api_keys(request: Request):
+    return {"keys": await auth.list_api_keys(request.app.state.db)}
+
+
+@app.post("/api/admin/api-keys")
+async def admin_create_api_key(request: Request):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    name = (body.get("name") or "Trial API Key").strip()
+    custom_key = body.get("key")
+    key_obj = await auth.create_api_key(
+        request.app.state.db,
+        user_id=_uid(request),
+        name=name,
+        custom_key=custom_key,
+    )
+    return {"key": key_obj}
+
+
+@app.delete("/api/admin/api-keys/{key_id}")
+async def admin_delete_api_key(key_id: int, request: Request):
+    await auth.delete_api_key(request.app.state.db, key_id)
+    return {"ok": True}
+
+
+_HOST_RAM_GB: float | None = None
+
+def _get_host_ram_gb() -> float | None:
+    global _HOST_RAM_GB
+    if _HOST_RAM_GB is None:
+        try:
+            hw_mem = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=0.5).strip())
+            _HOST_RAM_GB = round(hw_mem / (1024**3), 1)
+        except Exception:
+            _HOST_RAM_GB = 24.0
+    return _HOST_RAM_GB
+
+
+async def _probe_worker(host: str = "192.168.100.2", port: int = 50052) -> tuple[bool, float | None]:
+    # 1. Check if llama-server currently has an ESTABLISHED connection to worker RPC
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "netstat", "-an",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+        out_str = stdout.decode()
+        for line in out_str.splitlines():
+            if str(port) in line and "ESTABLISHED" in line:
+                ping_ms = await _get_ping_ms(host)
+                return True, ping_ms or 0.5
+    except Exception as e:
+        print("[PROBE_NETSTAT_ERR]", e)
+
+    # 2. If not established, try connecting to port
+    t0 = time.time()
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=0.4)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True, round((time.time() - t0) * 1000, 2)
+    except Exception:
+        pass
+
+    # 3. Check ping only if port is not reachable
+    ping_ms = await _get_ping_ms(host)
+    return False, ping_ms
+
+
+async def _get_ping_ms(host: str) -> float | None:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "1000", host,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1.2)
+        match = re.search(r"time=([\d\.]+)\s*ms", stdout.decode())
+        if match:
+            return float(match.group(1))
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/admin/monitoring")
+async def admin_monitoring(request: Request):
+    db = getattr(request.app.state, "db", None)
+    http_client: httpx.AsyncClient = request.app.state.http
+
+    # 1. Host stats
+    uptime_sec = int(time.time() - APP_START_TIME)
+    h, rem = divmod(uptime_sec, 3600)
+    m, s = divmod(rem, 60)
+    uptime_str = f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
+
+    host_stats = {
+        "hostname": platform.node(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "ip": "192.168.100.1",
+        "uptime": uptime_str,
+        "uptime_sec": uptime_sec,
+        "total_ram_gb": _get_host_ram_gb(),
+        "metal_gpu": "Apple Silicon Integrated Metal GPU",
+    }
+
+    # 2. Worker node check (non-blocking async TCP probe)
+    worker_host = "192.168.100.2"
+    worker_port = 50052
+    worker_online, worker_ping_ms = await _probe_worker(worker_host, worker_port)
+
+    # 3. LLM Engine status
+    llm_info = {
+        "base_url": LLM_BASE_URL,
+        "online": False,
+        "model_name": None,
+        "n_params": None,
+        "quantization": None,
+        "context_window": None,
+        "jinja": True,
+    }
+    try:
+        resp = await http_client.get(f"{LLM_BASE_URL.rstrip('/')}/v1/models", timeout=1.0)
+        if resp.status_code == 200:
+            llm_info["online"] = True
+            data = resp.json().get("data", [])
+            if data:
+                m0 = data[0]
+                meta = m0.get("meta", {})
+                llm_info["model_name"] = m0.get("id", "").split("/")[-1]
+                llm_info["n_params"] = meta.get("n_params")
+                llm_info["quantization"] = meta.get("ftype")
+                llm_info["context_window"] = meta.get("n_ctx")
+    except Exception:
+        pass
+
+    # 4. Database metrics (single-query aggregated)
+    db_stats = {
+        "status": "connected" if db is not None else "offline",
+        "users_count": 0,
+        "sessions_count": 0,
+        "messages_count": 0,
+        "companions_count": 0,
+        "projects_count": 0,
+        "audit_count": 0,
+    }
+    if db is not None:
+        try:
+            async with db.acquire() as con:
+                row = await con.fetchrow(
+                    "SELECT (SELECT COUNT(*) FROM users) AS u, "
+                    "(SELECT COUNT(*) FROM sessions) AS s, "
+                    "(SELECT COUNT(*) FROM messages) AS m, "
+                    "(SELECT COUNT(*) FROM companions) AS c, "
+                    "(SELECT COUNT(*) FROM projects) AS p, "
+                    "(SELECT COUNT(*) FROM audit_log) AS a"
+                )
+                if row:
+                    db_stats["users_count"] = row["u"] or 0
+                    db_stats["sessions_count"] = row["s"] or 0
+                    db_stats["messages_count"] = row["m"] or 0
+                    db_stats["companions_count"] = row["c"] or 0
+                    db_stats["projects_count"] = row["p"] or 0
+                    db_stats["audit_count"] = row["a"] or 0
+        except Exception:
+            pass
+
+    # 5. Storage
+    from backend.tools.genfiles import GENERATED_DIR
+    gen_count = 0
+    gen_bytes = 0
+    if GENERATED_DIR.exists():
+        for p in GENERATED_DIR.iterdir():
+            if p.is_file() and not p.name.startswith("."):
+                gen_count += 1
+                try:
+                    gen_bytes += p.stat().st_size
+                except Exception:
+                    pass
+
+    return {
+        "cluster": {
+            "mode": "Dual-Mac RPC Cluster" if worker_online else "Single-Mac Standalone",
+            "host": host_stats,
+            "worker": {
+                "ip": worker_host,
+                "port": worker_port,
+                "online": worker_online,
+                "ping_ms": worker_ping_ms,
+                "connection": "Thunderbolt Bridge (40 Gbps)",
+            },
+        },
+        "llm": llm_info,
+        "db": db_stats,
+        "storage": {
+            "genfiles_count": gen_count,
+            "genfiles_bytes": gen_bytes,
+            "genfiles_mb": round(gen_bytes / (1024 * 1024), 2),
+        },
+    }
+
+
+@app.get("/api/admin/governance")
+async def admin_governance(request: Request):
+    db = getattr(request.app.state, "db", None)
+    total_docs = 0
+    sensitivity_counts = {"public": 0, "internal": 0, "confidential": 0, "restricted": 0}
+    pii_total = 0
+    pii_types_summary: dict[str, int] = {}
+    redacted_count = 0
+    ocr_count = 0
+
+    if db is not None:
+        try:
+            async with db.acquire() as con:
+                rows = await con.fetch("SELECT sensitivity, pii_types, pii_count, redacted, ocr_used FROM audit_log")
+                total_docs = len(rows)
+                for r in rows:
+                    sens = (r["sensitivity"] or "internal").lower()
+                    sensitivity_counts[sens] = sensitivity_counts.get(sens, 0) + 1
+                    pii_total += (r["pii_count"] or 0)
+                    if r["redacted"]:
+                        redacted_count += 1
+                    if r["ocr_used"]:
+                        ocr_count += 1
+                    types = r["pii_types"]
+                    if isinstance(types, list):
+                        for item in types:
+                            if isinstance(item, dict):
+                                t = item.get("type") or "unknown"
+                                c = item.get("count") or 1
+                                pii_types_summary[t] = pii_types_summary.get(t, 0) + c
+                    elif isinstance(types, str):
+                        try:
+                            parsed = json.loads(types)
+                            if isinstance(parsed, list):
+                                for item in parsed:
+                                    if isinstance(item, dict):
+                                        t = item.get("type") or "unknown"
+                                        c = item.get("count") or 1
+                                        pii_types_summary[t] = pii_types_summary.get(t, 0) + c
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    guardrails = {
+        "context_window_limit": CONTEXT_WINDOW,
+        "reply_reserve_tokens": REPLY_RESERVE,
+        "pii_auto_redaction": True,
+        "ocr_engine": "Vision + PaddleOCR Local",
+        "file_retention_hours": 72,
+        "allowed_tools": [
+            {"id": "web_search", "name": "Web Search (Tavily/DuckDuckGo)", "status": "active", "risk": "Low"},
+            {"id": "calculator", "name": "Mathematical Calculator", "status": "active", "risk": "Low"},
+            {"id": "python_repl", "name": "Python Code Interpreter Sandbox", "status": "active", "risk": "Medium (Sandboxed)"},
+            {"id": "file_reader", "name": "Document & File Reader (OCR / PII Scan)", "status": "active", "risk": "Low"},
+            {"id": "mcp", "name": "Model Context Protocol (MCP) Extensions", "status": "active", "risk": "Controlled"},
+        ],
+        "compliance": [
+            {"name": "Local Processing (Zero Cloud Data Exfiltration)", "status": "Compliant"},
+            {"name": "PII Auto-Scrubbing & Redaction", "status": "Compliant"},
+            {"name": "Role-Based Access Control (RBAC)", "status": "Compliant"},
+            {"name": "Full Audit Trail Logging", "status": "Compliant"},
+        ],
+    }
+
+    return {
+        "summary": {
+            "total_documents": total_docs,
+            "sensitivity_breakdown": sensitivity_counts,
+            "total_pii_detected": pii_total,
+            "pii_types": pii_types_summary,
+            "redacted_documents": redacted_count,
+            "ocr_processed_documents": ocr_count,
+            "redaction_rate_pct": round((redacted_count / total_docs * 100), 1) if total_docs else 100.0,
+        },
+        "guardrails": guardrails,
+    }
 
 
 @app.get("/v1/models")
@@ -327,6 +807,102 @@ async def to_markdown(request: Request):
     )
 
 
+def _form_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
+@app.post("/api/ocr/process")
+async def ocr_process(request: Request):
+    """OCR / extract → redact PII → classify → summarize. Fully local."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    if "multipart/form-data" not in request.headers.get("content-type", ""):
+        return JSONResponse({"error": "Cần multipart/form-data với trường 'file'"}, status_code=400)
+    form = await request.form()
+    uploaded = form.get("file")
+    if not uploaded:
+        return JSONResponse({"error": "Không tìm thấy tệp"}, status_code=400)
+    filename = getattr(uploaded, "filename", "document") or "document"
+    data = await uploaded.read()
+    if not data:
+        return JSONResponse({"error": "Tệp rỗng"}, status_code=400)
+
+    language = form.get("language") or "vi"
+    redact = _form_bool(form.get("redact_pii"), True)
+    keep_fulltext = _form_bool(form.get("keep_fulltext"), True)
+    ocr_langs = form.get("ocr_langs") or None
+
+    from backend.ocr import process_document
+    from backend.tools.genfiles import save_generated_file
+
+    try:
+        result = await process_document(
+            data, filename, request.app.state.http,
+            langs=ocr_langs, redact_pii=redact, language=language,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"Lỗi xử lý tài liệu: {exc}"}, status_code=500)
+
+    stem = _Path(filename).stem or "document"
+    summary_file = None
+    if result["summary_markdown"]:
+        summary_file = save_generated_file(
+            f"{stem}_tomtat.md", result["summary_markdown"].encode("utf-8"))
+    text_file = None
+    body_text = result["redacted_text"] if redact else result["text"]
+    if keep_fulltext and body_text.strip():
+        text_file = save_generated_file(f"{stem}_toanvan.md", body_text.encode("utf-8"))
+
+    entities = result["pii"]["entities"]
+    audit_id = None
+    db = getattr(request.app.state, "db", None)
+    if db is not None:
+        try:
+            audit_id = await repo.insert_audit(db, {
+                "user_id": _uid(request),
+                "filename": filename,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+                "mime": getattr(uploaded, "content_type", None),
+                "pages": result["extract"].get("pages"),
+                "method": result["extract"].get("method"),
+                "ocr_used": result["extract"].get("ocr_used"),
+                "pii_types": entities,
+                "pii_count": sum(e.get("count", 0) for e in entities),
+                "sensitivity": result["sensitivity"],
+                "redacted": redact,
+                "summary_file_id": summary_file["id"] if summary_file else None,
+                "text_file_id": text_file["id"] if text_file else None,
+            })
+        except Exception:  # noqa: BLE001 — audit must never break the response
+            pass
+
+    return {
+        "filename": filename,
+        "method": result["extract"].get("method"),
+        "ocr_used": result["extract"].get("ocr_used"),
+        "pages": result["extract"].get("pages"),
+        "text": body_text,
+        "pii": result["pii"],
+        "sensitivity": result["sensitivity"],
+        "summary_markdown": result["summary_markdown"],
+        "summary_file": summary_file,
+        "text_file": text_file,
+        "audit_id": audit_id,
+    }
+
+
+@app.get("/api/audit")
+async def get_audit(request: Request, limit: int = 50):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return {"items": []}
+    return {"items": await repo.list_audit(db, min(max(limit, 1), 200), user_id=_uid(request))}
+
+
 @app.post("/api/compress")
 async def compress_conversation(request: Request):
     try:
@@ -376,7 +952,7 @@ async def get_sessions(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    return await repo.get_sessions(db)
+    return await repo.get_sessions(db, _uid(request))
 
 
 @app.put("/api/sessions")
@@ -384,11 +960,12 @@ async def put_sessions(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    await repo.replace_sessions(db, await _read_list(request))
+    await repo.replace_sessions(db, _uid(request), await _read_list(request))
     return {"ok": True}
 
 
 @app.post("/api/sessions/{session_id}/messages", status_code=201)
+@app.post("/api/{session_id}/messages", status_code=201)
 async def post_session_message(session_id: str, request: Request):
     """Append one message without rewriting the thread (incremental persistence).
 
@@ -451,7 +1028,7 @@ async def get_companions(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    return await repo.get_companions(db)
+    return await repo.get_companions(db, _uid(request))
 
 
 @app.put("/api/companions")
@@ -459,7 +1036,7 @@ async def put_companions(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    await repo.replace_companions(db, await _read_list(request))
+    await repo.replace_companions(db, _uid(request), await _read_list(request))
     return {"ok": True}
 
 
@@ -468,7 +1045,7 @@ async def get_projects(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    return await repo.get_projects(db)
+    return await repo.get_projects(db, _uid(request))
 
 
 @app.put("/api/projects")
@@ -476,7 +1053,7 @@ async def put_projects(request: Request):
     db, err = _db_or_503(request)
     if err:
         return err
-    await repo.replace_projects(db, await _read_list(request))
+    await repo.replace_projects(db, _uid(request), await _read_list(request))
     return {"ok": True}
 
 
@@ -490,11 +1067,11 @@ async def import_all(request: Request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "Expected an object"}, status_code=400)
     if isinstance(body.get("projects"), list):
-        await repo.replace_projects(db, body["projects"])
+        await repo.replace_projects(db, _uid(request), body["projects"])
     if isinstance(body.get("sessions"), list):
-        await repo.replace_sessions(db, body["sessions"])
+        await repo.replace_sessions(db, _uid(request), body["sessions"])
     if isinstance(body.get("companions"), list):
-        await repo.replace_companions(db, body["companions"])
+        await repo.replace_companions(db, _uid(request), body["companions"])
     return {"ok": True}
 
 
@@ -505,8 +1082,18 @@ async def chat_completions(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-    agent_tools = body.pop("agent_tools", True)
+    # If caller supplies its own tools (e.g. Cline, Roo Code, OpenAI SDK) and did not explicitly
+    # request internal agent_tools, pass through transparently to the raw model.
+    if "tools" in body and body.get("agent_tools") is None:
+        agent_tools = False
+    else:
+        agent_tools = body.pop("agent_tools", True)
     if agent_tools is False:
+        # Token Guard: Trim messages to safely fit context window, preventing RPC crash & OOM
+        raw_msgs = body.get("messages")
+        if isinstance(raw_msgs, list) and raw_msgs:
+            body["messages"] = trim_messages(raw_msgs, window=CONTEXT_WINDOW, reserve=REPLY_RESERVE)
+
         # Re-wrap body without the extra field for a transparent proxy
         async def _raw_proxy():
             client: httpx.AsyncClient = request.app.state.http

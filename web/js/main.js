@@ -17,6 +17,63 @@ import { initMessageSearch } from "./features/messageSearch.js";
 import { loadPresets, savePresets, attachSlashCommands } from "./features/promptLibrary.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
+    // --- Authentication gate: nothing loads until a user is logged in. ---
+    let currentUser = null;
+    try {
+        const me = await fetch("/api/auth/me", { cache: "no-store" }).then((r) => r.json());
+        currentUser = me && me.user;
+    } catch (e) { currentUser = null; }
+    if (!currentUser) { showLoginGate(); return; }
+    window.__bobigoUser = currentUser;
+
+    // Account controls in the nav rail.
+    const _logoutBtn = document.getElementById("rail-logout-btn");
+    if (_logoutBtn) {
+        _logoutBtn.title = `Đăng xuất (${currentUser.username})`;
+        _logoutBtn.addEventListener("click", async () => {
+            try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ }
+            location.reload();
+        });
+    }
+    const _adminBtn = document.getElementById("rail-admin-btn");
+    if (_adminBtn && currentUser.role === "admin") {
+        _adminBtn.style.display = "";
+        _adminBtn.addEventListener("click", () => { location.href = "/admin.html"; });
+    }
+
+    function showLoginGate() {
+        const overlay = document.getElementById("login-overlay");
+        const form = document.getElementById("login-form");
+        const errEl = document.getElementById("login-error");
+        const submitBtn = document.getElementById("login-submit");
+        if (!overlay || !form) return;
+        overlay.style.display = "flex";
+        document.getElementById("login-username").focus();
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            errEl.textContent = "";
+            submitBtn.disabled = true;
+            try {
+                const resp = await fetch("/api/auth/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        username: document.getElementById("login-username").value,
+                        password: document.getElementById("login-password").value,
+                    }),
+                });
+                if (!resp.ok) {
+                    const j = await resp.json().catch(() => ({}));
+                    throw new Error(j.error || "Đăng nhập thất bại");
+                }
+                location.reload();
+            } catch (err) {
+                errEl.textContent = err.message || String(err);
+                submitBtn.disabled = false;
+            }
+        });
+    }
+
     // Wait for the IndexedDB-backed store to open + migrate legacy localStorage
     // data before we read any sessions/companions synchronously below.
     if (window.BobigoDB) await window.BobigoDB.ready;
@@ -107,6 +164,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     let contextInfo = { window: 8192, reserve: 2048 }; // from /api/health
     let isCompressing = false;
     let contextMeter = null; // assigned once DOM refs exist (see init below)
+    let health = null;       // health controller — created further down; guarded in checkHealth()
+    let _ctxTokenTimer = 0;  // declared early: updateContextMeter() runs during boot
     const _durableQueue = []; // messages awaiting incremental server append
 
     // Icon/label per generated-file kind. Declared early (before initSessions →
@@ -283,7 +342,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         return sp;
     }
 
-    let _ctxTokenTimer = 0;
     function updateContextMeter() {
         if (!contextMeter) return; // not yet initialized (early renders during boot)
         const session = getActiveSession();
@@ -589,6 +647,142 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     });
 
+    // ---- OCR & Document Intelligence view ---------------------------------
+    const railOcrBtn = document.getElementById("rail-ocr-btn");
+    const ocrView = document.getElementById("ocr-view");
+    if (railOcrBtn && ocrView) {
+        const ocrFileInput = document.getElementById("ocr-file-input");
+        const ocrPickBtn = document.getElementById("ocr-pick-btn");
+        const ocrDropzone = document.getElementById("ocr-dropzone");
+        const ocrResult = document.getElementById("ocr-result");
+        const ocrAudit = document.getElementById("ocr-audit");
+        let ocrAuditLoaded = false;
+
+        const SENS_META = {
+            public: { label: "Công khai", cls: "sens-public" },
+            internal: { label: "Nội bộ", cls: "sens-internal" },
+            confidential: { label: "Mật", cls: "sens-confidential" },
+            restricted: { label: "Tối mật", cls: "sens-restricted" },
+        };
+
+        railOcrBtn.addEventListener("click", () => {
+            document.body.classList.remove("mode-companion", "mode-project");
+            document.body.classList.add("mode-ocr");
+            setNavActive(railOcrBtn);
+            if (isMobile()) closeAllDrawers();
+        });
+
+        // Tabs
+        ocrView.querySelectorAll(".ocr-tab").forEach((tab) => {
+            tab.addEventListener("click", () => {
+                const key = tab.getAttribute("data-ocr-tab");
+                ocrView.querySelectorAll(".ocr-tab").forEach((t) => t.classList.toggle("active", t === tab));
+                ocrView.querySelectorAll(".ocr-tab-panel").forEach((p) =>
+                    p.classList.toggle("active", p.getAttribute("data-ocr-panel") === key));
+                if (key === "audit") loadOcrAudit();
+            });
+        });
+
+        ocrPickBtn.addEventListener("click", () => ocrFileInput.click());
+        ocrFileInput.addEventListener("change", (e) => {
+            const f = e.target.files[0];
+            ocrFileInput.value = "";
+            if (f) processOcrFile(f);
+        });
+        ["dragover", "dragenter"].forEach((ev) => ocrDropzone.addEventListener(ev, (e) => {
+            e.preventDefault(); ocrDropzone.classList.add("drag");
+        }));
+        ["dragleave", "drop"].forEach((ev) => ocrDropzone.addEventListener(ev, (e) => {
+            e.preventDefault(); ocrDropzone.classList.remove("drag");
+        }));
+        ocrDropzone.addEventListener("drop", (e) => {
+            const f = e.dataTransfer.files[0];
+            if (f) processOcrFile(f);
+        });
+
+        // Reuse the file-preview modal for OCR output cards.
+        ocrResult.addEventListener("click", (e) => {
+            const btn = e.target.closest(".gen-file-view");
+            if (!btn) return;
+            const card = btn.closest(".generated-file-card");
+            if (card) openFilePreview({ id: card.dataset.id, name: card.dataset.name, kind: card.dataset.kind, mime: card.dataset.mime });
+        });
+
+        async function processOcrFile(file) {
+            if (file.size > 25 * 1024 * 1024) { alert("Tệp quá lớn (tối đa 25MB)."); return; }
+            ocrResult.innerHTML = `<div class="ocr-loading"><i class="fa-solid fa-spinner fa-spin"></i> Đang OCR & tóm tắt "${escapeHtml(file.name)}"…</div>`;
+            try {
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("language", config.language || "vi");
+                fd.append("ocr_langs", document.getElementById("ocr-lang").value);
+                fd.append("redact_pii", document.getElementById("ocr-redact").checked ? "true" : "false");
+                const resp = await fetch("/api/ocr/process", { method: "POST", body: fd });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.error || `HTTP ${resp.status}`);
+                }
+                renderOcrResult(await resp.json());
+                ocrAuditLoaded = false; // refresh audit next time it's opened
+            } catch (err) {
+                ocrResult.innerHTML = `<div class="ocr-error">Lỗi: ${escapeHtml(err.message || String(err))}</div>`;
+            }
+        }
+
+        function renderOcrResult(d) {
+            const sens = SENS_META[d.sensitivity] || SENS_META.internal;
+            const pii = (d.pii && d.pii.entities) || [];
+            const piiChips = pii.length
+                ? pii.map((p) => `<span class="pii-chip">${escapeHtml(p.type)} · ${p.count}</span>`).join("")
+                : `<span class="pii-chip pii-none">Không phát hiện PII</span>`;
+            const files = [d.summary_file, d.text_file].filter(Boolean);
+            let html = `
+                <div class="ocr-result-head">
+                    <span class="sens-badge ${sens.cls}">${sens.label}</span>
+                    <span class="ocr-meta">${escapeHtml(d.filename || "")} · ${d.method === "ocr" ? "OCR" : "trích xuất"}${d.pages ? " · " + d.pages + " trang" : ""}</span>
+                </div>
+                <div class="ocr-pii-row">${piiChips}</div>`;
+            if (d.summary_markdown) {
+                html += `<div class="ocr-section-title">Tóm tắt</div>
+                    <div class="ocr-summary response-content">${renderMarkdown(d.summary_markdown)}</div>`;
+            }
+            if (files.length) html += buildGeneratedFilesHTML(files);
+            html += `<details class="ocr-fulltext"><summary>Toàn văn đã trích xuất${d.pii && d.pii.has_pii ? " (PII đã che)" : ""}</summary>
+                <pre>${escapeHtml(d.text || "")}</pre></details>`;
+            ocrResult.innerHTML = html;
+            enhanceMarkdownElements(ocrResult);
+        }
+
+        async function loadOcrAudit() {
+            if (ocrAuditLoaded) return;
+            ocrAudit.innerHTML = `<div class="ocr-loading"><i class="fa-solid fa-spinner fa-spin"></i></div>`;
+            try {
+                const data = await (await fetch("/api/audit?limit=100", { cache: "no-store" })).json();
+                const items = data.items || [];
+                ocrAuditLoaded = true;
+                if (!items.length) { ocrAudit.innerHTML = `<div class="ocr-empty">Chưa có bản ghi nào.</div>`; return; }
+                const rows = items.map((it) => {
+                    const sens = SENS_META[it.sensitivity] || SENS_META.internal;
+                    const when = it.created_at ? new Date(it.created_at).toLocaleString() : "";
+                    const dl = it.summary_file_id ? `<a href="/api/files/${it.summary_file_id}?download=1" title="Tải tóm tắt"><i class="fa-solid fa-download"></i></a>` : "";
+                    return `<tr>
+                        <td>${escapeHtml(when)}</td>
+                        <td title="${escapeHtml(it.filename)}">${escapeHtml(it.filename)}</td>
+                        <td><span class="sens-badge ${sens.cls}">${sens.label}</span></td>
+                        <td>${it.pii_count || 0}</td>
+                        <td>${it.ocr_used ? "OCR" : "trích xuất"}</td>
+                        <td>${dl}</td>
+                    </tr>`;
+                }).join("");
+                ocrAudit.innerHTML = `<div class="ocr-table-wrap"><table class="ocr-table">
+                    <thead><tr><th>Thời gian</th><th>Tệp</th><th>Độ nhạy cảm</th><th>PII</th><th>Phương thức</th><th></th></tr></thead>
+                    <tbody>${rows}</tbody></table></div>`;
+            } catch (err) {
+                ocrAudit.innerHTML = `<div class="ocr-error">Không tải được nhật ký: ${escapeHtml(err.message || String(err))}</div>`;
+            }
+        }
+    }
+
     railChatBtn.addEventListener("click", () => {
         setMode("chat");
         setNavActive(railChatBtn);
@@ -708,7 +902,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const statusLabel = document.getElementById("status-label");
     const statusBanner = document.getElementById("status-banner");
 
-    const health = createHealthController({
+    const healthController = createHealthController({
         els: { statusLabel, statusDot, statusBanner },
         getLanguage: () => config.language || "vi",
         onApplied: (data, ready) => {
@@ -730,6 +924,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                 : (lang === "en" ? "Waiting for model to be ready…" : "Đợi mô hình sẵn sàng…");
         },
     });
+    health = healthController; // bind the forward-declared controller reference
 
     function applyHealth(data) {
         // Thin delegate — onApplied() inside the controller syncs llmReady,
@@ -742,6 +937,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     async function checkHealth() {
+        if (!health) return; // controller not yet created during early boot
         await health.checkHealth();
     }
 
@@ -872,7 +1068,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function initSessions() {
         if (sessions.length === 0) {
-            createNewSession(false);
+            const s = createNewSession(false);
+            currentSessionId = s.id;
         } else {
             currentSessionId = sessions[0].id;
         }
@@ -905,7 +1102,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
         const found = sessions.find(s => s.id === currentSessionId);
         if (appMode === "project") return found || null; // no cross-project fallback
-        return found || sessions[0];
+        const active = found || sessions[0] || null;
+        if (active && !currentSessionId) {
+            currentSessionId = active.id;
+        }
+        return active;
     }
 
     function initCompanions() {
@@ -929,6 +1130,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function setMode(mode) {
         appMode = mode;
+        document.body.classList.remove("mode-ocr"); // leaving OCR when a chat mode is picked
         document.body.classList.toggle("mode-companion", mode === "companion");
         document.body.classList.toggle("mode-project", mode === "project");
         const searchWrap = document.getElementById("history-search-wrap");
@@ -975,8 +1177,10 @@ document.addEventListener("DOMContentLoaded", async () => {
                     if (isGenerating) return;
                     const prompt = card.getAttribute("data-prompt");
                     if (prompt) {
-                        userInput.value = prompt;
-                        handleSendMessage();
+                        userInput.value = "";
+                        userInput.style.height = "auto";
+                        sendBtn.disabled = true;
+                        handleSendMessage({ text: prompt });
                     }
                 });
             });
@@ -2098,10 +2302,10 @@ document.addEventListener("DOMContentLoaded", async () => {
             if (isGenerating) return;
             const prompt = card.getAttribute("data-prompt");
             if (prompt) {
-                userInput.value = prompt;
+                userInput.value = "";
                 userInput.style.height = "auto";
-                sendBtn.disabled = false;
-                handleSendMessage();
+                sendBtn.disabled = true;
+                handleSendMessage({ text: prompt });
             }
         });
     });
@@ -2368,8 +2572,29 @@ document.addEventListener("DOMContentLoaded", async () => {
                 if (streamDone || currentSessionId !== targetSessionId) return;
                 const liveBubble = getLiveBubble();
                 if (!liveBubble) return;
+                // Remember where the reader is BEFORE swapping the HTML:
+                // - the chat viewport may only stick to the bottom when the
+                //   user hasn't scrolled up (e.g. to read the thinking trace),
+                //   otherwise every incoming token yanks them back down and
+                //   makes the conversation unscrollable mid-generation;
+                // - the .thinking-content box scrolls independently (it has a
+                //   max-height + overflow-y:auto), and rebuilding innerHTML
+                //   would recreate it with scrollTop reset to 0 — so preserve
+                //   the manual offset, or follow the tail when already at it.
+                const prevThinking = liveBubble.querySelector(".thinking-content");
+                let thinkScrollTop = 0;
+                let thinkFollow = true;
+                if (prevThinking) {
+                    thinkScrollTop = prevThinking.scrollTop;
+                    thinkFollow = prevThinking.scrollHeight - prevThinking.scrollTop - prevThinking.clientHeight <= 24;
+                }
+                const stickToBottom = isNearBottom();
                 liveBubble.innerHTML = buildLiveHTML();
-                scrollToBottom();
+                const nextThinking = liveBubble.querySelector(".thinking-content");
+                if (nextThinking) {
+                    nextThinking.scrollTop = thinkFollow ? nextThinking.scrollHeight : thinkScrollTop;
+                }
+                if (stickToBottom) scrollToBottom();
             });
         }
 
@@ -2733,6 +2958,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function scrollToBottom() {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    // True when the chat viewport sits (almost) at the bottom. Live-streaming
+    // updates consult this so auto-scroll never drags the user away from
+    // content they deliberately scrolled up to read while still generating.
+    function isNearBottom(threshold = 120) {
+        return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight <= threshold;
     }
 
     // --------------------------------------------------------------------------

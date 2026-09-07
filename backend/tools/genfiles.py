@@ -38,9 +38,21 @@ _MIME_OVERRIDES = {
 }
 
 
+def _ascii_slug(name: str) -> str:
+    """Transliterate Vietnamese (and other accented) text to ASCII so a name like
+    'Báo cáo đối sánh' becomes 'Bao cao doi sanh' — instead of losing every
+    accented letter to a dash."""
+    import unicodedata
+    # đ/Đ do not decompose under NFD, map them explicitly.
+    name = name.replace("đ", "d").replace("Đ", "D")
+    decomposed = unicodedata.normalize("NFD", name)
+    return "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+
+
 def _safe_name(name: str) -> str:
-    base = (name or "file").strip().replace(" ", "_")
-    base = _UNSAFE.sub("-", base).strip("-") or "file"
+    base = _ascii_slug((name or "file").strip()).replace(" ", "_")
+    base = _UNSAFE.sub("_", base)
+    base = re.sub(r"_{2,}", "_", base).strip("_-.") or "file"
     return base[:80]
 
 

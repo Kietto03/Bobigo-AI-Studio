@@ -6,8 +6,8 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
-# Server — loopback by default so local tools are not reachable on LAN
-HOST = os.environ.get("HOST", "127.0.0.1")
+# Server — 0.0.0.0 allows LAN access (or set HOST env to override)
+HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
 # LLM Backend (llama-server)
@@ -19,6 +19,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://bobigo:bobigo@127.0.0.1:5433/bobigo"
 )
 
+# OCR (Tesseract — fully local/offline for sensitive data)
+TESSERACT_LANGS = os.environ.get("TESSERACT_LANGS", "vie+eng")
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
+
 # Agent defaults
 DEFAULT_MODEL = "qwen35b-uncensored"
 DEFAULT_SYSTEM_PROMPT = (
@@ -28,10 +32,10 @@ DEFAULT_SYSTEM_PROMPT_EN = (
     "You are Bobigo, an AI assistant. Be accurate, useful, and friendly."
 )
 
-# Tool settings
+# Agent settings
 CODE_EXEC_TIMEOUT = 15  # seconds
 MAX_SEARCH_RESULTS = 5
-MAX_AGENT_ITERATIONS = 6  # prevent infinite tool loops
+MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "30"))  # prevent infinite tool loops
 MAX_URL_BYTES = 1_000_000
 URL_FETCH_TIMEOUT = 15
 MAX_REDIRECTS = 5
@@ -56,6 +60,6 @@ GENERATED_TTL_HOURS = float(os.environ.get("GENERATED_TTL_HOURS", "72"))
 # Logging verbosity for the backend ("DEBUG"|"INFO"|"WARNING"|...).
 LOG_LEVEL = os.environ.get("BOBIGO_LOG_LEVEL", "INFO").upper()
 
-CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "8192"))
+CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "16384"))
 REPLY_RESERVE = 2048
 TOOL_RESULT_CAP = 2500

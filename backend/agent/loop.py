@@ -71,7 +71,12 @@ def sse_done() -> str:
     return "data: [DONE]\n\n"
 
 
-def content_chunk(content: str = "", reasoning: str = "", tool_events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def content_chunk(
+    content: str = "",
+    reasoning: str = "",
+    tool_events: list[dict[str, Any]] | None = None,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
     delta: dict[str, Any] = {}
     if reasoning:
         delta["reasoning_content"] = reasoning
@@ -79,7 +84,10 @@ def content_chunk(content: str = "", reasoning: str = "", tool_events: list[dict
         delta["content"] = content
     if tool_events:
         delta["tool_events"] = tool_events
-    return {"choices": [{"index": 0, "delta": delta}]}
+    choice: dict[str, Any] = {"index": 0, "delta": delta}
+    if finish_reason is not None:
+        choice["finish_reason"] = finish_reason
+    return {"choices": [choice]}
 
 
 def prepare_messages(
@@ -243,8 +251,7 @@ async def stream_agent(
                 if use_tools:
                     payload["tools"] = tool_schemas(mcp)
                     payload["tool_choice"] = "auto"
-                if body.get("repeat_penalty") is not None:
-                    payload["repeat_penalty"] = body["repeat_penalty"]
+                payload["repeat_penalty"] = body.get("repeat_penalty", 1.1)
                 if body.get("max_tokens"):
                     payload["max_tokens"] = body["max_tokens"]
 
@@ -317,25 +324,26 @@ async def stream_agent(
                 messages.extend(tool_msgs)
                 if iteration == MAX_AGENT_ITERATIONS - 1:
                     cap = "Đã đạt giới hạn số vòng gọi công cụ. Hãy thử yêu cầu đơn giản hơn."
-                    yield sse_pack(content_chunk(content=cap))
+                    yield sse_pack(content_chunk(content=cap, finish_reason="stop"))
                     yield sse_done()
                     return
                 continue
 
             if not forwarded_any and (visible or full_content):
-                yield sse_pack(content_chunk(content=visible or full_content))
-            elif not forwarded_any and finish_reason:
-                pass
+                yield sse_pack(content_chunk(content=visible or full_content, finish_reason="stop"))
+            else:
+                yield sse_pack(content_chunk(finish_reason="stop"))
             yield sse_done()
             return
 
         yield sse_pack(content_chunk(
             content="Đã đạt giới hạn số vòng gọi công cụ. Hãy thử yêu cầu đơn giản hơn.",
+            finish_reason="stop",
         ))
         yield sse_done()
     except httpx.HTTPError as exc:
-        yield sse_pack(content_chunk(content=f"Lỗi kết nối mô hình: {exc}"))
+        yield sse_pack(content_chunk(content=f"Lỗi kết nối mô hình: {exc}", finish_reason="stop"))
         yield sse_done()
     except Exception as exc:
-        yield sse_pack(content_chunk(content=f"Lỗi agent: {exc}"))
+        yield sse_pack(content_chunk(content=f"Lỗi agent: {exc}", finish_reason="stop"))
         yield sse_done()

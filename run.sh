@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # 0. Start PostgreSQL (Docker) — the app's data store
-if command -v docker >/dev/null 2>&1; then
+if docker info >/dev/null 2>&1; then
     echo "🐘 Starting PostgreSQL via Docker Compose..."
     docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d db >/dev/null 2>&1
     echo -n "⏳ Waiting for PostgreSQL..."
@@ -45,7 +45,7 @@ if command -v docker >/dev/null 2>&1; then
         sleep 1
     done
 else
-    echo "⚠️  Docker không có sẵn — bỏ qua Postgres. App sẽ chạy chế độ offline (IndexedDB cục bộ)."
+    echo "⚠️  Docker daemon không chạy — bỏ qua Postgres. App sẽ chạy chế độ offline (IndexedDB cục bộ)."
 fi
 
 # 1. Start llama-server backend if not already running on port 11434
@@ -81,13 +81,16 @@ else
 fi
 
 # 2. Start Web UI Server on port 8000
-echo "🌐 Starting Web UI server on http://localhost:8000..."
+echo "🌐 Starting Web UI server on port 8000 (0.0.0.0)..."
 "$PYTHON" "$PROJECT_DIR/server.py" &
 SERVER_PID=$!
 
 sleep 1
 
-# 3. Open browser automatically
+# 3. Detect LAN IP
+LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || ifconfig | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1)
+
+# 4. Open browser automatically
 echo "🚀 Opening Bobigo AI Studio in default browser..."
 if command -v open >/dev/null 2>&1; then
     open "http://localhost:8000"
@@ -97,7 +100,11 @@ fi
 
 echo ""
 echo "=================================================================="
-echo "🎉 Bobigo Studio is Live at: http://localhost:8000"
+echo "🎉 Bobigo Studio is Live:"
+echo "   👉 Local: http://localhost:8000"
+if [ -n "$LAN_IP" ]; then
+echo "   👉 LAN:   http://$LAN_IP:8000"
+fi
 echo "Press Ctrl+C to stop the application."
 echo "=================================================================="
 

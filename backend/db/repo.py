@@ -58,15 +58,18 @@ def _merge_message(row: asyncpg.Record) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Sessions
 # --------------------------------------------------------------------------- #
-async def get_sessions(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+async def get_sessions(pool: asyncpg.Pool, user_id: int) -> list[dict[str, Any]]:
     async with pool.acquire() as con:
         srows = await con.fetch(
             "SELECT id, title, project_id, pinned, created_at "
-            "FROM sessions ORDER BY position NULLS LAST, created_at DESC"
+            "FROM sessions WHERE user_id = $1 ORDER BY position NULLS LAST, created_at DESC",
+            user_id,
         )
         mrows = await con.fetch(
-            "SELECT session_id, role, content, text, reasoning, pinned, data "
-            "FROM messages WHERE session_id IS NOT NULL ORDER BY session_id, seq"
+            "SELECT m.session_id, m.role, m.content, m.text, m.reasoning, m.pinned, m.data "
+            "FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.user_id = $1 ORDER BY m.session_id, m.seq",
+            user_id,
         )
     by_session: dict[str, list[dict[str, Any]]] = {}
     for m in mrows:
@@ -88,28 +91,30 @@ async def get_sessions(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     return out
 
 
-async def replace_sessions(pool: asyncpg.Pool, sessions: list[dict[str, Any]]) -> None:
+async def replace_sessions(pool: asyncpg.Pool, user_id: int, sessions: list[dict[str, Any]]) -> None:
     ids = [s.get("id") for s in sessions if s.get("id")]
     async with pool.acquire() as con:
         async with con.transaction():
             await con.execute(
-                "DELETE FROM sessions WHERE NOT (id = ANY($1::text[]))", ids
+                "DELETE FROM sessions WHERE user_id = $2 AND NOT (id = ANY($1::text[]))",
+                ids, user_id,
             )
             for pos, s in enumerate(sessions):
                 sid = s.get("id")
                 if not sid:
                     continue
                 await con.execute(
-                    """INSERT INTO sessions (id, title, project_id, pinned, created_at, updated_at, position)
-                       VALUES ($1, $2, $3, $4, COALESCE($5, now()), now(), $6)
+                    """INSERT INTO sessions (id, title, project_id, pinned, user_id, created_at, updated_at, position)
+                       VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), now(), $7)
                        ON CONFLICT (id) DO UPDATE SET
                          title = EXCLUDED.title,
                          project_id = EXCLUDED.project_id,
                          pinned = EXCLUDED.pinned,
                          updated_at = now(),
-                         position = EXCLUDED.position""",
+                         position = EXCLUDED.position
+                       WHERE sessions.user_id = EXCLUDED.user_id""",
                     sid, s.get("title") or "", s.get("projectId"),
-                    bool(s.get("pinned")), _parse_ts(s.get("createdAt")), pos,
+                    bool(s.get("pinned")), user_id, _parse_ts(s.get("createdAt")), pos,
                 )
                 await con.execute("DELETE FROM messages WHERE session_id = $1", sid)
                 rows = []
@@ -166,16 +171,19 @@ async def delete_session(pool: asyncpg.Pool, session_id: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Companions (each carries a single continuous chat)
 # --------------------------------------------------------------------------- #
-async def get_companions(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+async def get_companions(pool: asyncpg.Pool, user_id: int) -> list[dict[str, Any]]:
     async with pool.acquire() as con:
         crows = await con.fetch(
             "SELECT id, name, emoji, avatar, tagline, persona, instructions, "
             "knowledge, language, created_at "
-            "FROM companions ORDER BY position NULLS LAST, created_at DESC"
+            "FROM companions WHERE user_id = $1 ORDER BY position NULLS LAST, created_at DESC",
+            user_id,
         )
         mrows = await con.fetch(
-            "SELECT companion_id, role, content, text, reasoning, pinned, data "
-            "FROM messages WHERE companion_id IS NOT NULL ORDER BY companion_id, seq"
+            "SELECT m.companion_id, m.role, m.content, m.text, m.reasoning, m.pinned, m.data "
+            "FROM messages m JOIN companions c ON c.id = m.companion_id "
+            "WHERE c.user_id = $1 ORDER BY m.companion_id, m.seq",
+            user_id,
         )
     by_comp: dict[str, list[dict[str, Any]]] = {}
     for m in mrows:
@@ -198,12 +206,13 @@ async def get_companions(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     return out
 
 
-async def replace_companions(pool: asyncpg.Pool, companions: list[dict[str, Any]]) -> None:
+async def replace_companions(pool: asyncpg.Pool, user_id: int, companions: list[dict[str, Any]]) -> None:
     ids = [c.get("id") for c in companions if c.get("id")]
     async with pool.acquire() as con:
         async with con.transaction():
             await con.execute(
-                "DELETE FROM companions WHERE NOT (id = ANY($1::text[]))", ids
+                "DELETE FROM companions WHERE user_id = $2 AND NOT (id = ANY($1::text[]))",
+                ids, user_id,
             )
             for pos, c in enumerate(companions):
                 cid = c.get("id")
@@ -212,16 +221,17 @@ async def replace_companions(pool: asyncpg.Pool, companions: list[dict[str, Any]
                 await con.execute(
                     """INSERT INTO companions
                        (id, name, emoji, avatar, tagline, persona, instructions,
-                        knowledge, language, created_at, updated_at, position)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, now()), now(), $11)
+                        knowledge, language, user_id, created_at, updated_at, position)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, COALESCE($11, now()), now(), $12)
                        ON CONFLICT (id) DO UPDATE SET
                          name = EXCLUDED.name, emoji = EXCLUDED.emoji, avatar = EXCLUDED.avatar,
                          tagline = EXCLUDED.tagline, persona = EXCLUDED.persona,
                          instructions = EXCLUDED.instructions, knowledge = EXCLUDED.knowledge,
-                         language = EXCLUDED.language, updated_at = now(), position = EXCLUDED.position""",
+                         language = EXCLUDED.language, updated_at = now(), position = EXCLUDED.position
+                       WHERE companions.user_id = EXCLUDED.user_id""",
                     cid, c.get("name") or "", c.get("emoji"), c.get("avatar"),
                     c.get("tagline") or "", c.get("persona") or "", c.get("instructions") or "",
-                    c.get("knowledge") or [], c.get("language") or "vi",
+                    c.get("knowledge") or [], c.get("language") or "vi", user_id,
                     _parse_ts(c.get("createdAt")), pos,
                 )
                 await con.execute("DELETE FROM messages WHERE companion_id = $1", cid)
@@ -242,11 +252,12 @@ async def replace_companions(pool: asyncpg.Pool, companions: list[dict[str, Any]
 # --------------------------------------------------------------------------- #
 # Projects
 # --------------------------------------------------------------------------- #
-async def get_projects(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+async def get_projects(pool: asyncpg.Pool, user_id: int) -> list[dict[str, Any]]:
     async with pool.acquire() as con:
         rows = await con.fetch(
             "SELECT id, name, description, instructions, color, knowledge, created_at "
-            "FROM projects ORDER BY position NULLS LAST, created_at DESC"
+            "FROM projects WHERE user_id = $1 ORDER BY position NULLS LAST, created_at DESC",
+            user_id,
         )
     return [{
         "id": r["id"],
@@ -259,12 +270,13 @@ async def get_projects(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     } for r in rows]
 
 
-async def replace_projects(pool: asyncpg.Pool, projects: list[dict[str, Any]]) -> None:
+async def replace_projects(pool: asyncpg.Pool, user_id: int, projects: list[dict[str, Any]]) -> None:
     ids = [p.get("id") for p in projects if p.get("id")]
     async with pool.acquire() as con:
         async with con.transaction():
             await con.execute(
-                "DELETE FROM projects WHERE NOT (id = ANY($1::text[]))", ids
+                "DELETE FROM projects WHERE user_id = $2 AND NOT (id = ANY($1::text[]))",
+                ids, user_id,
             )
             for pos, p in enumerate(projects):
                 pid = p.get("id")
@@ -272,13 +284,55 @@ async def replace_projects(pool: asyncpg.Pool, projects: list[dict[str, Any]]) -
                     continue
                 await con.execute(
                     """INSERT INTO projects
-                       (id, name, description, instructions, color, knowledge, created_at, updated_at, position)
-                       VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7, now()), now(), $8)
+                       (id, name, description, instructions, color, knowledge, user_id, created_at, updated_at, position)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7, COALESCE($8, now()), now(), $9)
                        ON CONFLICT (id) DO UPDATE SET
                          name = EXCLUDED.name, description = EXCLUDED.description,
                          instructions = EXCLUDED.instructions, color = EXCLUDED.color,
-                         knowledge = EXCLUDED.knowledge, updated_at = now(), position = EXCLUDED.position""",
+                         knowledge = EXCLUDED.knowledge, updated_at = now(), position = EXCLUDED.position
+                       WHERE projects.user_id = EXCLUDED.user_id""",
                     pid, p.get("name") or "", p.get("description") or "",
                     p.get("instructions") or "", p.get("color"),
-                    p.get("knowledge") or [], _parse_ts(p.get("createdAt")), pos,
+                    p.get("knowledge") or [], user_id, _parse_ts(p.get("createdAt")), pos,
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Audit log (OCR & Document Intelligence)
+# --------------------------------------------------------------------------- #
+async def insert_audit(pool: asyncpg.Pool, entry: dict[str, Any]) -> int:
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """INSERT INTO audit_log
+               (user_id, filename, sha256, size, mime, pages, method, ocr_used,
+                pii_types, pii_count, sensitivity, redacted, summary_file_id, text_file_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+               RETURNING id""",
+            entry.get("user_id"), entry.get("filename") or "", entry.get("sha256"), entry.get("size"),
+            entry.get("mime"), entry.get("pages"), entry.get("method"),
+            bool(entry.get("ocr_used")), entry.get("pii_types") or [],
+            int(entry.get("pii_count") or 0), entry.get("sensitivity"),
+            bool(entry.get("redacted")), entry.get("summary_file_id"),
+            entry.get("text_file_id"),
+        )
+        return row["id"]
+
+
+async def list_audit(pool: asyncpg.Pool, limit: int = 50, user_id: int | None = None) -> list[dict[str, Any]]:
+    """List audit rows. user_id=None ⇒ all users (admin); otherwise only that user's.
+    Includes the owner username for the admin view."""
+    async with pool.acquire() as con:
+        if user_id is None:
+            rows = await con.fetch(
+                "SELECT a.*, u.username FROM audit_log a LEFT JOIN users u ON u.id = a.user_id "
+                "ORDER BY a.created_at DESC LIMIT $1", limit)
+        else:
+            rows = await con.fetch(
+                "SELECT * FROM audit_log WHERE user_id = $2 ORDER BY created_at DESC LIMIT $1",
+                limit, user_id)
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
+        out.append(item)
+    return out

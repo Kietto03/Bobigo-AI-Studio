@@ -18,7 +18,36 @@
     <script src="vendor/highlight.min.js" defer></script>
     <link rel="stylesheet" href="style.css">
 </head>
-<body class="dark">
+<body class="light">
+<script>
+/* Apply the persisted theme before first paint so the login screen always
+   matches the theme chosen in the main app. Default: light (Daylight). */
+(function () {
+    try {
+        var MAP = { obsidian: ["dark"], daylight: ["light"], indigo: ["dark", "theme-indigo"],
+                    evergreen: ["dark", "theme-evergreen"], amethyst: ["dark", "theme-amethyst"],
+                    porcelain: ["light", "theme-porcelain"] };
+        var cls = MAP[localStorage.getItem("bobigo_theme")] || ["light"];
+        ["dark", "light", "theme-indigo", "theme-evergreen", "theme-amethyst", "theme-porcelain"]
+            .forEach(function (c) { document.body.classList.remove(c); });
+        cls.forEach(function (c) { document.body.classList.add(c); });
+    } catch (e) {}
+})();
+</script>
+    <!-- Login gate -->
+    <div class="login-overlay" id="login-overlay" style="display:none;">
+        <form class="login-card" id="login-form" autocomplete="on">
+            <img src="logo.png" alt="Bobigo" class="login-logo">
+            <h1>Đăng nhập Bobigo</h1>
+            <p class="login-sub">AI Studio nội bộ</p>
+            <input id="login-username" type="text" name="username" placeholder="Tên đăng nhập" autocomplete="username" required>
+            <input id="login-password" type="password" name="password" placeholder="Mật khẩu" autocomplete="current-password" required>
+            <div class="login-error" id="login-error"></div>
+            <button type="submit" id="login-submit">Đăng nhập</button>
+            <div class="login-foot"><i class="fa-solid fa-shield-halved"></i>Chạy 100% cục bộ · Không telemetry · Không API key</div>
+        </form>
+    </div>
+
     <div class="sidebar-overlay hidden" id="sidebar-overlay"></div>
     <div class="app-layout">
         <!-- 1. Leftmost Nav Rail -->
@@ -36,10 +65,19 @@
                 <button class="rail-btn" id="rail-projects-btn" data-i18n-title="projects" title="Projects">
                     <i class="fa-solid fa-folder-open"></i>
                 </button>
+                <button class="rail-btn" id="rail-ocr-btn" title="OCR & Tóm tắt tài liệu">
+                    <i class="fa-solid fa-file-invoice"></i>
+                </button>
             </div>
             <div class="rail-bottom">
+                <button class="rail-btn" id="rail-admin-btn" title="Quản trị" style="display:none;">
+                    <i class="fa-solid fa-user-shield"></i>
+                </button>
                 <button class="rail-btn" id="open-settings-btn" data-i18n-title="config" title="Cài đặt">
                     <i class="fa-solid fa-gear"></i>
+                </button>
+                <button class="rail-btn" id="rail-logout-btn" title="Đăng xuất">
+                    <i class="fa-solid fa-right-from-bracket"></i>
                 </button>
             </div>
         </nav>
@@ -191,6 +229,42 @@
                 </p>
             </div>
         </main>
+
+        <!-- OCR & Document Intelligence view -->
+        <section class="ocr-view" id="ocr-view">
+            <header class="ocr-header">
+                <div class="ocr-title"><i class="fa-solid fa-file-invoice"></i> OCR &amp; Tóm tắt tài liệu</div>
+                <div class="ocr-tabs">
+                    <button type="button" class="ocr-tab active" data-ocr-tab="process">Xử lý</button>
+                    <button type="button" class="ocr-tab" data-ocr-tab="audit">Nhật ký</button>
+                </div>
+            </header>
+            <div class="ocr-body">
+                <div class="ocr-tab-panel active" data-ocr-panel="process">
+                    <p class="ocr-hint"><i class="fa-solid fa-shield-halved"></i> Xử lý hoàn toàn cục bộ (Tesseract + LLM nội bộ) — dữ liệu không rời máy chủ.</p>
+                    <div class="ocr-dropzone" id="ocr-dropzone">
+                        <i class="fa-solid fa-cloud-arrow-up"></i>
+                        <p>Kéo thả tệp vào đây, hoặc <button type="button" id="ocr-pick-btn" class="ocr-linklike">chọn tệp</button></p>
+                        <span class="ocr-formats">Ảnh, PDF (kể cả scan), Word, Excel, PowerPoint, HTML…</span>
+                        <input type="file" id="ocr-file-input" accept=".png,.jpg,.jpeg,.tiff,.tif,.bmp,.webp,.gif,.pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.html,.htm,.txt,.md,.csv" style="display:none">
+                    </div>
+                    <div class="ocr-options">
+                        <label>Ngôn ngữ OCR:
+                            <select id="ocr-lang">
+                                <option value="vie+eng">Việt + Anh</option>
+                                <option value="vie">Tiếng Việt</option>
+                                <option value="eng">English</option>
+                            </select>
+                        </label>
+                        <label class="ocr-check"><input type="checkbox" id="ocr-redact" checked> Che thông tin nhạy cảm (PII)</label>
+                    </div>
+                    <div class="ocr-result" id="ocr-result"></div>
+                </div>
+                <div class="ocr-tab-panel" data-ocr-panel="audit">
+                    <div class="ocr-audit" id="ocr-audit"></div>
+                </div>
+            </div>
+        </section>
 
         <!-- 4. Slide-out Config Panel -->
         <div class="modal-backdrop hidden settings-backdrop" id="config-panel" role="dialog" aria-modal="true">

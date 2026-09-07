@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bobigo AI Studio — Nhận API Key Dùng Thử</title>
+    <link rel="icon" type="image/png" href="logo.png">
+    <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body.trial-page {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: var(--bg-main, #0d1117);
+            color: var(--text-main, #f0f6fc);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .trial-card {
+            width: 100%;
+            max-width: 680px;
+            background: var(--bg-surface, #161b22);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 16px;
+            padding: 32px;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+        }
+        .trial-header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .trial-logo {
+            width: 56px;
+            height: 56px;
+            border-radius: 14px;
+            margin-bottom: 12px;
+            box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
+        }
+        .trial-title {
+            font-size: 1.6rem;
+            font-weight: 800;
+            margin: 0 0 6px;
+            letter-spacing: -0.02em;
+        }
+        .trial-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            background: rgba(16, 185, 129, 0.12);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            margin-top: 4px;
+        }
+        .trial-desc {
+            color: var(--text-sub, #8b949e);
+            font-size: 0.92rem;
+            margin-top: 10px;
+            line-height: 1.5;
+        }
+        .gen-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .gen-input {
+            flex: 1;
+            padding: 12px 16px;
+            background: var(--bg-main, #0d1117);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 10px;
+            color: var(--text-main, #f0f6fc);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .gen-input:focus { border-color: var(--brand, #6366f1); }
+        .gen-btn {
+            padding: 12px 22px;
+            background: var(--brand, #6366f1);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            transition: opacity 0.2s;
+        }
+        .gen-btn:hover { opacity: 0.9; }
+        .result-box {
+            background: var(--bg-main, #0d1117);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 24px;
+        }
+        .result-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-sub, #8b949e);
+            margin-bottom: 6px;
+        }
+        .key-display {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.95rem;
+            color: #818cf8;
+            word-break: break-all;
+        }
+        .copy-btn {
+            background: var(--bg-surface, #161b22);
+            border: 1px solid var(--border, #30363d);
+            color: var(--text-main, #f0f6fc);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .code-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--border, #30363d);
+            padding-bottom: 8px;
+        }
+        .code-tab {
+            background: transparent;
+            border: none;
+            color: var(--text-sub, #8b949e);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .code-tab.active {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-main, #f0f6fc);
+        }
+        .code-block {
+            background: var(--bg-main, #0d1117);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 8px;
+            padding: 14px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85rem;
+            line-height: 1.45;
+            color: #e6edf3;
+            overflow-x: auto;
+            position: relative;
+        }
+        .trial-footer {
+            margin-top: 24px;
+            text-align: center;
+            font-size: 0.82rem;
+            color: var(--text-sub, #8b949e);
+        }
+        .trial-footer a { color: var(--brand, #6366f1); text-decoration: none; }
+    </style>
+</head>
+<body class="trial-page">
+    <div class="trial-card">
+        <div class="trial-header">
+            <img src="logo.png" alt="Bobigo Logo" class="trial-logo">
+            <h1 class="trial-title">Bobigo AI Studio</h1>
+            <div class="trial-badge"><i class="fa-solid fa-bolt"></i> Dual-Mac Metal GPU Cluster (Qwen 35B)</div>
+            <p class="trial-desc">Nhận API Key dùng thử miễn phí để kết nối trực tiếp với mô hình AI qua chuẩn OpenAI API (hỗ trợ Python, cURL, Open WebUI, Cursor, Next.js...).</p>
+        </div>
+
+        <form id="gen-form" class="gen-box">
+            <input id="user-name" class="gen-input" placeholder="Nhập tên của bạn hoặc tên ứng dụng (vd: Nam Dev, Test App)..." required>
+            <button type="submit" class="gen-btn"><i class="fa-solid fa-key"></i> Lấy API Key</button>
+        </form>
+
+        <div id="result-box" class="result-box" style="display:none;">
+            <div class="result-label">Khóa API của bạn (API Key):</div>
+            <div class="key-display">
+                <span id="key-val"></span>
+                <button id="copy-key" class="copy-btn"><i class="fa-solid fa-copy"></i> Sao chép</button>
+            </div>
+            <div style="margin-top: 14px; font-size: 0.85rem; color: var(--text-sub);">
+                <strong>Endpoint (Base URL):</strong> <code id="base-url-val" style="color:#10b981"></code>
+            </div>
+        </div>
+
+        <div>
+            <div class="code-tabs">
+                <button class="code-tab active" data-lang="curl">cURL (Terminal)</button>
+                <button class="code-tab" data-lang="python">Python (openai)</button>
+            </div>
+            <pre class="code-block" id="code-preview"></pre>
+        </div>
+
+        <div class="trial-footer">
+            Bobigo AI Studio · Kết nối qua mạng nội bộ · <a href="/">Mở giao diện Chat Web</a>
+        </div>
+    </div>
+
+    <script>
+        const host = window.location.hostname;
+        const port = window.location.port ? `:${window.location.port}` : '';
+        const baseUrl = `http://${host}${port}/v1`;
+        let currentKey = "sk-bobigo-trial-2026";
+
+        document.getElementById("base-url-val").textContent = baseUrl;
+
+        function renderSnippets(key) {
+            const lang = document.querySelector(".code-tab.active").dataset.lang;
+            const pre = document.getElementById("code-preview");
+            if (lang === "curl") {
+                pre.textContent = `curl ${baseUrl}/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "messages": [{"role": "user", "content": "Xin chào Bobigo!"}],\n    "max_tokens": 100\n  }'`;
+            } else {
+                pre.textContent = `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${baseUrl}",\n    api_key="${key}",\n)\n\nresponse = client.chat.completions.create(\n    model="qwen35b-uncensored",\n    messages=[{"role": "user", "content": "Xin chào Bobigo!"}],\n)\n\nprint(response.choices[0].message.content)`;
+            }
+        }
+
+        document.querySelectorAll(".code-tab").forEach(tab => {
+            tab.addEventListener("click", () => {
+                document.querySelectorAll(".code-tab").forEach(t => t.classList.remove("active"));
+                tab.classList.add("active");
+                renderSnippets(currentKey);
+            });
+        });
+
+        document.getElementById("gen-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const name = document.getElementById("user-name").value.trim();
+            if (!name) return;
+            try {
+                const res = await fetch("/api/auth/trial-key", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: name })
+                });
+                const data = await res.json();
+                if (data.key) {
+                    currentKey = data.key;
+                    document.getElementById("key-val").textContent = currentKey;
+                    document.getElementById("result-box").style.display = "block";
+                    renderSnippets(currentKey);
+                }
+            } catch (err) {
+                alert("Lỗi khi tạo API Key: " + err.message);
+            }
+        });
+
+        document.getElementById("copy-key").addEventListener("click", () => {
+            navigator.clipboard.writeText(currentKey);
+            const btn = document.getElementById("copy-key");
+            btn.innerHTML = '<i class="fa-solid fa-check text-success"></i> Đã sao chép';
+            setTimeout(() => {
+                btn.innerHTML = '<i class="fa-solid fa-copy"></i> Sao chép';
+            }, 1500);
+        });
+
+        renderSnippets(currentKey);
+    </script>
+</body>
+</html>

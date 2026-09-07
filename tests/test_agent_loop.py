@@ -194,3 +194,17 @@ def test_stops_before_second_iteration_when_cancelled():
         assert "giới hạn" not in text   # clean stop, not a cap message
 
     asyncio.run(main())
+
+
+def test_agent_loop_emits_finish_reason_stop():
+    """Ensure standard OpenAI clients (Cline, Roo Code) receive finish_reason: stop."""
+    async def llm(_payload):
+        yield {"choices": [{"delta": {"content": "Xin chào!"}}]}
+
+    async def runner(_name, _args):
+        return ""
+
+    raw = _collect({"messages": [{"role": "user", "content": "hi"}]}, llm, runner)
+    assert '"finish_reason": "stop"' in raw
+    assert "data: [DONE]" in raw
+
