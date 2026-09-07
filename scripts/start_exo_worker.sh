@@ -39,4 +39,5 @@ fi
 LIBP2P_PORT="${EXO_LIBP2P_PORT:-52416}"
 
 echo "🚀 Đang kết nối vào cụm MLX tại $HOST_IP:$LIBP2P_PORT..."
-exec /usr/bin/caffeinate -dimsu "$EXO_BIN" --no-api --libp2p-port "$LIBP2P_PORT" --bootstrap-peers "${HOST_IP}:${LIBP2P_PORT}" "$@"
+exec /usr/bin/caffeinate -dimsu "$EXO_BIN" --libp2p-port "$LIBP2P_PORT" --bootstrap-peers "${HOST_IP}:${LIBP2P_PORT}" "$@"
+
