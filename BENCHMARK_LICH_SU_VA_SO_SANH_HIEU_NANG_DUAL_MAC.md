@@ -137,15 +137,48 @@ $$\text{Tốc độ sinh Token tối đa (TPS)} = \frac{\text{Băng thông RAM (
 
 ---
 
-## 🎯 4. Lộ Trình & Khuyến Nghị Vận Hành Tối Ưu Cho Bạn
+### GIAI ĐOẠN 6: Baseline Đơn Máy — Khám Phá Cốt Lõi (1 Mac Mini, 0% RPC, 0% Network)
+
+* **Mô hình sử dụng:** `Hermes3.6-35B-A3B-Uncensored-Genesis-V7-APEX-Compact.gguf` (16.2 GB).
+* **Phát hiện bước ngoặt:**
+  - Mô hình 35B-A3B nặng **16.2 GB**.
+  - Giới hạn GPU Metal an toàn của 1 máy Mac Mini 24GB là **17.76 GB** (và có thể nâng lên **20.48 GB** qua `iogpu.wired_limit_mb`).
+  - **Mô hình vừa khít trên 1 máy duy nhất!** Việc chia đôi model sang 2 máy trước đây là không cần thiết và phải trả giá bằng toàn bộ overhead RPC/mạng.
+* **Số liệu đo đạc thực tế ngày 07/09/2026:**
+  ```text
+  prompt eval time = 282.6 ms / 30 tokens (78.33 tokens/giây) --> TTFT chỉ 0.28 giây!
+  eval time        = 6726.2 ms / 200 tokens (29.59 tokens/giây ~ 30 TPS)
+  ```
+* **Kết quả:**
+  - Tốc độ sinh token tăng lên **~30 TPS** (nhanh hơn ~17% so với 25.3 TPS của RPC).
+  - Tốc độ xử lý câu hỏi (Prefill TTFT) tăng từ 37 TPS lên **78.3 TPS** (nhanh hơn gấp đôi, chữ phản hồi gần như tức thì).
+  - **Máy Worker được giải phóng 100% tài nguyên** (rảnh rỗi 24GB RAM để làm tác vụ khác).
+
+---
+
+## ⚙️ 4. Hướng Dẫn Tăng Giới Hạn Wired Memory GPU (`20480 MB`)
+
+Theo mặc định, macOS giới hạn Metal GPU ở mức 75% RAM (~17.76 GB trên máy 24GB). Để mở rộng trần bộ nhớ lên **20 GB**, giúp hệ thống thoải mái chứa các mô hình ~17GB mà vẫn dư dả 3–4GB cho KV Cache dài:
+
+Chạy script cài đặt tự động (đã tạo trong repo):
+```bash
+sudo ./scripts/set_wired_memory.sh
+```
+
+Script sẽ:
+1. Áp dụng ngay lập tức: `sysctl iogpu.wired_limit_mb=20480`.
+2. Tạo file `/Library/LaunchDaemons/com.bobigo.iogpu.plist` để **tự động duy trì 20GB sau mỗi lần reboot**.
+
+---
+
+## 🎯 5. Lộ Trình & Khuyến Nghị Vận Hành Tối Ưu Cho Bạn
 
 Dựa trên toàn bộ dữ liệu thực nghiệm đã kiểm chứng 100%:
 
-### Lựa chọn 1: Nếu mục tiêu là TỐC ĐỘ & ĐỘ MƯỢT MÀ TỐI ĐA (Khuyên Dùng Nhất)
-* **Giải pháp:** Sử dụng **Qwen 3.6 35B-A3B Uncensored** qua cụm `llama.cpp RPC` (`./scripts/dual_mac.sh connect`).
-* **Lý do:** Tận dụng triệt để sức mạnh của cả 2 máy Mac Mini M4, đạt tốc độ đỉnh cao **25.5 TPS**, bộ nhớ mỗi máy chỉ dùng 35%, hệ thống chạy êm ái, bền bỉ và không bao giờ bị nghẽn.
+### Khuyến nghị 1: Cấu hình Vận Hành Tối Ưu Nhất (Đơn Máy Host — 30 TPS)
+* **Lệnh chạy:** `./scripts/dual_mac.sh local`
+* **Hiệu quả:** Chạy trọn vẹn mô hình **Qwen 3.6 35B-A3B** trên 1 máy Host, đạt **30 TPS**, TTFT **0.28s**, RAM trống 81%, Worker hoàn toàn rảnh rỗi.
 
-### Lựa chọn 2: Nếu BẮT BUỘC PHẢI DÙNG QWEN 3.8 (Chấp nhận tốc độ vừa phải)
-* **Giải pháp:** Tuyệt đối không dùng bản 6-bit (21GB). Chuyển sang bản **Qwen 3.8 4-bit (14.5 GB)**:
-  - Bản 14.5GB nằm gọn trong ngưỡng an toàn 17.76GB của GPU Worker.
-  - Tốc độ sinh token ước tính đạt **~8.5 – 9.5 TPS** (gấp đôi so với mức 4.8 TPS hiện tại, vừa đủ để đọc theo dòng chữ mà không bị ức chế).
+### Khuyến nghị 2: Hướng khai thác cụm 48GB trong tương lai
+* Đúng như nhận định kiến trúc: **Giá trị thực sự của cụm 48GB là Dung lượng (VRAM), không phải cố gánh Dense model.**
+* Cụm 2 máy nên được dùng cho các siêu mô hình **MoE lớn hơn** (tổng trọng số 35–45GB, nhưng Active chỉ 3–6B) mà 1 máy không chứa nổi. Khi đó bạn vừa sở hữu mô hình cực kỳ thông minh, vừa giữ trọn vẹn tốc độ **25 – 35 tokens/s**.
