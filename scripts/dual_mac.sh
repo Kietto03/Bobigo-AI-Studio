@@ -304,9 +304,38 @@ restart_host() {
     start_host
 }
 
+start_local() {
+    say "=== Khởi động Chế độ Đơn Máy Hiệu Năng Cao (Metal Local, 0 RPC, ~30 TPS) ==="
+    stop_host
+    stop_exo
+    stop_speculative
+    local model
+    model="$(model_path)"
+    [[ -n "$model" && -f "$model" ]] || die "Không tìm thấy MODEL_PATH; đặt MODEL_PATH=/path/model.gguf"
+
+    say "Khởi động llama-server Native Metal trên Host (Port $LLM_PORT)..."
+    RPC_SERVER="none" REQUIRE_RPC=0 MODEL_PATH="$model" CONTEXT_WINDOW="${CONTEXT_WINDOW:-8192}" \
+        nohup bash "$PROJECT_DIR/scripts/start_backend.sh" > "$PROJECT_DIR/backend-local.log" 2>&1 &
+
+    say "Chờ LLM API sẵn sàng (tối đa 30s)..."
+    for _ in $(seq 1 30); do
+        if curl -sf "http://127.0.0.1:$LLM_PORT/v1/models" >/dev/null 2>&1; then
+            echo "✅ Single-Mac LLM Engine ĐÃ SẴN SÀNG!"
+            echo "   Tốc độ: ~30 TPS | TTFT: < 0.3s | RAM: 16GB"
+            echo "   Máy phụ (Worker) được GIẢI PHÓNG 100% tài nguyên."
+            return
+        fi
+        sleep 1
+    done
+    die "LLM chưa ready; xem $PROJECT_DIR/backend-local.log"
+}
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") <command>
+
+Single Mac (Khuyên Dùng Nhất - 30 TPS, TTFT < 0.3s):
+  local | start-local  Chạy đơn máy Host 100% Metal, giải phóng Worker
 
 Worker Mac:
   install-worker       Cài launchd RPC worker và tự khởi động (llama.cpp)
@@ -315,9 +344,9 @@ Worker Mac:
   start-exo-worker     Chạy EXO worker node (MLX)
 
 Host Mac:
-  start-speculative    [Khuyên Dùng B1] Kết nối Worker Speculative Decoding (30-45 TPS)
-  stop-speculative     Dừng kết nối Speculative
   connect              Kiểm tra Worker, khởi động llama-server với --rpc (Qwen 35B)
+  start-speculative    Kết nối Worker Speculative Decoding
+  stop-speculative     Dừng kết nối Speculative
   start-exo            Khởi động cụm phân tán EXO (Qwen 3.8 MLX)
   stop-exo             Dừng cụm EXO
   restart              Dừng, sửa mạng và khởi động lại toàn bộ Host (llama.cpp)
@@ -333,6 +362,7 @@ EOF
 }
 
 case "${1:-}" in
+    local|start-local) start_local ;;
     install-worker) install_worker ;;
     uninstall-worker) uninstall_worker ;;
     status-worker) status_worker ;;
