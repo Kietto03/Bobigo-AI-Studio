@@ -24,7 +24,7 @@ TESSERACT_LANGS = os.environ.get("TESSERACT_LANGS", "vie+eng")
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
 
 # Agent defaults
-DEFAULT_MODEL = "qwen35b-uncensored"
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "qwen35b-uncensored")
 DEFAULT_SYSTEM_PROMPT = (
     "Bạn là Bobigo, trợ lý AI. Trả lời chính xác, hữu ích và thân thiện."
 )

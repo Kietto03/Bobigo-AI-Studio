@@ -144,14 +144,21 @@ status_host() {
 
     echo "--- 2. Tiến trình LLM ---"
     if pgrep -f llama-server >/dev/null 2>&1; then
-        echo "✅ llama-server đang chạy"
+        echo "✅ llama-server đang chạy (Port $LLM_PORT)"
     else
-        echo "⚠️ llama-server chưa chạy"
+        echo "ℹ️  llama-server không chạy"
     fi
-    if curl -m 3 -sf "http://127.0.0.1:$LLM_PORT/v1/models" >/dev/null 2>&1; then
-        echo "✅ LLM API ready (port $LLM_PORT)"
+    if pgrep -f 'exo' | grep -v 'EXO.app' >/dev/null 2>&1 || pgrep -f 'EXO' >/dev/null 2>&1; then
+        echo "✅ EXO Cluster engine đang chạy (Port 52415)"
     else
-        echo "⚠️ LLM API chưa ready"
+        echo "ℹ️  EXO Cluster không chạy"
+    fi
+
+    if curl -m 2 -sf "http://127.0.0.1:$LLM_PORT/v1/models" >/dev/null 2>&1; then
+        echo "✅ LLM API (Port $LLM_PORT): READY"
+    fi
+    if curl -m 2 -sf "http://127.0.0.1:52415/v1/models" >/dev/null 2>&1; then
+        echo "✅ EXO API (Port 52415): READY"
     fi
 
     echo "--- 3. Web & API Health ---"
@@ -169,7 +176,7 @@ start_host() {
     [[ -n "$model" && -f "$model" ]] || die "Không tìm thấy MODEL_PATH; đặt MODEL_PATH=/path/model.gguf"
     if lsof -nP -iTCP:"$LLM_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
         if ! ps -ax -o args | grep '[l]lama-server' | grep -q -- "--rpc $RPC_SERVER"; then
-            die "Port $LLM_PORT đang bận bởi llama-server không có --rpc; hãy dùng: ./scripts/dual_mac.sh restart"
+            die "Port $LLM_PORT đang bận bởi tiến trình khác; hãy dùng: ./scripts/dual_mac.sh stop-host"
         fi
         echo "✅ llama-server đã chạy với $RPC_SERVER"
     else
@@ -191,6 +198,32 @@ start_host() {
     die "LLM chưa ready; xem $PROJECT_DIR/backend-rpc.log"
 }
 
+start_exo() {
+    say "Dừng llama-server để giải phóng RAM cho MLX..."
+    stop_host
+    sleep 2
+    say "Khởi động EXO Cluster trên Host (Port 52415)..."
+    nohup bash "$PROJECT_DIR/scripts/start_exo_host.sh" > "$PROJECT_DIR/exo-host.log" 2>&1 &
+    local exo_pid=$!
+    echo "EXO Host PID: $exo_pid"
+    say "Chờ EXO Cluster API sẵn sàng (tối đa 30s)..."
+    for _ in $(seq 1 30); do
+        if curl -sf "http://127.0.0.1:52415/v1/models" >/dev/null 2>&1; then
+            echo "✅ EXO Cluster API đã sẵn sàng trên http://127.0.0.1:52415"
+            echo "👉 Dashboard: http://localhost:52415"
+            return
+        fi
+        sleep 1
+    done
+    echo "⚠️ EXO đang khởi động ngầm, xem log: tail -f $PROJECT_DIR/exo-host.log"
+}
+
+stop_exo() {
+    pkill -f 'start_exo_host.sh' 2>/dev/null || true
+    pkill -f '/exo' 2>/dev/null || true
+    echo "✅ Đã dừng EXO Cluster trên Host"
+}
+
 stop_host() {
     pkill -f 'start_backend.sh' 2>/dev/null || true
     pkill -f 'llama-server' 2>/dev/null || true
@@ -210,14 +243,17 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Worker Mac:
-  install-worker    Cài launchd RPC worker và tự khởi động
+  install-worker    Cài launchd RPC worker và tự khởi động (llama.cpp)
   uninstall-worker  Gỡ launchd RPC worker
   status-worker     Kiểm tra launchd và port RPC
+  start-exo-worker  Chạy EXO worker node (MLX)
 
 Host Mac:
-  connect           Kiểm tra Worker, khởi động llama-server với --rpc
-  restart           Dừng, sửa mạng và khởi động lại toàn bộ Host
-  status            Kiểm tra toàn diện Mạng, RPC, llama-server và Web API
+  connect           Kiểm tra Worker, khởi động llama-server với --rpc (Qwen 35B)
+  start-exo         Khởi động cụm phân tán EXO (Qwen 3.8 MLX)
+  stop-exo          Dừng cụm EXO
+  restart           Dừng, sửa mạng và khởi động lại toàn bộ Host (llama.cpp)
+  status            Kiểm tra toàn diện Mạng, RPC, EXO, llama-server và Web API
   fix-network       Cố định lại IP 192.168.100.1 trên cáp Thunderbolt
   stop-host         Dừng llama-server & supervisor
 
@@ -233,6 +269,8 @@ case "${1:-}" in
     uninstall-worker) uninstall_worker ;;
     status-worker) status_worker ;;
     connect|start-host) start_host ;;
+    start-exo) start_exo ;;
+    stop-exo) stop_exo ;;
     restart) restart_host ;;
     status) status_host ;;
     fix-network) fix_network ;;

@@ -37,9 +37,21 @@ def _llama_cmdline() -> str:
 def jinja_status() -> tuple[bool | None, str]:
     """Fallback detection via the process table (macOS/Linux `ps`)."""
     cmd = _llama_cmdline()
-    if not cmd:
-        return None, ""
-    return ("--jinja" in cmd.split()), cmd
+    if cmd:
+        return ("--jinja" in cmd.split()), cmd
+    # Check if mlx_lm or exo is running
+    try:
+        out = subprocess.check_output(
+            ["ps", "-ax", "-o", "args="],
+            text=True,
+            timeout=2,
+        )
+        for line in out.splitlines():
+            if ("mlx_lm" in line or "exo" in line) and "grep" not in line:
+                return True, line
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None, ""
 
 
 async def jinja_via_props(client: httpx.AsyncClient) -> bool | None:
