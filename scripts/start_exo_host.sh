@@ -39,5 +39,7 @@ else
     exit 1
 fi
 
+LIBP2P_PORT="${EXO_LIBP2P_PORT:-52416}"
+
 echo "🚀 Đang khởi động EXO..."
-exec "$EXO_BIN" --api-port "$API_PORT" "$@"
+exec "$EXO_BIN" --api-port "$API_PORT" --libp2p-port "$LIBP2P_PORT" "$@"
