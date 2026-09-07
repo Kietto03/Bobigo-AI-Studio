@@ -9,13 +9,16 @@ TARGET_MODEL="${TARGET_MODEL:-$HOME/.exo/models/orcarouter--Qwen3.8-27B-Uncensor
 DRAFT_MODEL="${DRAFT_MODEL:-$HOME/.exo/models/Qwen3.5-0.8B-OptiQ-4bit}"
 PORT="${PORT:-11434}"
 HOST="${HOST:-0.0.0.0}"
-NUM_DRAFT_TOKENS="${NUM_DRAFT_TOKENS:-4}"
+USE_DRAFT="${USE_DRAFT:-0}"
 
 echo "========================================================"
-echo "⚡ Khởi động MLX Speculative Decoding Engine trên Worker"
+echo "⚡ Khởi động MLX Engine trên Worker Mac Mini"
 echo "   Target Model (21GB): $TARGET_MODEL"
-echo "   Draft Model  (700MB): $DRAFT_MODEL"
-echo "   Draft Tokens:         $NUM_DRAFT_TOKENS"
+if [[ "$USE_DRAFT" == "1" ]]; then
+    echo "   Draft Model  (700MB): $DRAFT_MODEL (Tokens: $NUM_DRAFT_TOKENS)"
+else
+    echo "   Chế độ: Native MLX Server (Tối ưu GPU Metal 100%, 0ms Network Latency)"
+fi
 echo "   Endpoint:             http://${HOST}:${PORT}"
 echo "========================================================"
 
@@ -37,12 +40,20 @@ else
     exit 1
 fi
 
-echo "🚀 Đang nạp Target + Draft Model vào GPU Metal..."
-exec /usr/bin/caffeinate -dimsu "${EXEC_CMD[@]}" \
-  --model "$TARGET_MODEL" \
-  --draft-model "$DRAFT_MODEL" \
-  --num-draft-tokens "$NUM_DRAFT_TOKENS" \
-  --host "$HOST" \
-  --port "$PORT" \
-  --chat-template "$TARGET_MODEL/chat_template.jinja" \
-  "$@"
+ARGS=(
+  --model "$TARGET_MODEL"
+  --host "$HOST"
+  --port "$PORT"
+)
+
+if [[ -f "$TARGET_MODEL/chat_template.jinja" ]]; then
+    ARGS+=(--chat-template "$TARGET_MODEL/chat_template.jinja")
+fi
+
+if [[ "$USE_DRAFT" == "1" ]]; then
+    ARGS+=(--draft-model "$DRAFT_MODEL" --num-draft-tokens "$NUM_DRAFT_TOKENS")
+fi
+
+echo "🚀 Đang nạp mô hình vào GPU Metal..."
+exec /usr/bin/caffeinate -dimsu "${EXEC_CMD[@]}" "${ARGS[@]}" "$@"
+
