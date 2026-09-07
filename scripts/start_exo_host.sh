@@ -39,7 +39,8 @@ else
     exit 1
 fi
 
+WORKER_IP="${WORKER_IP:-192.168.100.2}"
 LIBP2P_PORT="${EXO_LIBP2P_PORT:-52416}"
 
-echo "🚀 Đang khởi động EXO..."
-exec "$EXO_BIN" --api-port "$API_PORT" --libp2p-port "$LIBP2P_PORT" "$@"
+echo "🚀 Đang khởi động EXO (Peer Worker: $WORKER_IP:$LIBP2P_PORT)..."
+exec "$EXO_BIN" --api-port "$API_PORT" --libp2p-port "$LIBP2P_PORT" --bootstrap-peers "${WORKER_IP}:${LIBP2P_PORT}" "$@"
