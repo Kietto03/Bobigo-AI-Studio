@@ -6,7 +6,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
-# Server — 0.0.0.0 to allow access from local network (LAN / VPN)
+# Server — 0.0.0.0 allows LAN access (or set HOST env to override)
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -19,6 +19,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://bobigo:bobigo@127.0.0.1:5433/bobigo"
 )
 
+# OCR (Tesseract — fully local/offline for sensitive data)
+TESSERACT_LANGS = os.environ.get("TESSERACT_LANGS", "vie+eng")
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
+
 # Agent defaults
 DEFAULT_MODEL = os.environ.get(
     "DEFAULT_MODEL", "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
@@ -30,10 +34,10 @@ DEFAULT_SYSTEM_PROMPT_EN = (
     "You are Bobigo, an AI assistant. Be accurate, useful, and friendly."
 )
 
-# Tool settings
+# Agent settings
 CODE_EXEC_TIMEOUT = 15  # seconds
 MAX_SEARCH_RESULTS = 5
-MAX_AGENT_ITERATIONS = 6  # prevent infinite tool loops
+MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "30"))  # prevent infinite tool loops
 MAX_URL_BYTES = 1_000_000
 URL_FETCH_TIMEOUT = 15
 MAX_REDIRECTS = 5

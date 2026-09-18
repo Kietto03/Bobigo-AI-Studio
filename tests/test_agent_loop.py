@@ -270,3 +270,16 @@ def test_prepare_messages_preserves_multiple_system_messages():
     assert "Database port is 5433" in sys_content
     assert prepared[1]["role"] == "user"
 
+
+def test_agent_loop_emits_finish_reason_stop():
+    """Ensure standard OpenAI clients (Cline, Roo Code) receive finish_reason: stop."""
+    async def llm(_payload):
+        yield {"choices": [{"delta": {"content": "Xin chào!"}}]}
+
+    async def runner(_name, _args):
+        return ""
+
+    raw = _collect({"messages": [{"role": "user", "content": "hi"}]}, llm, runner)
+    assert '"finish_reason": "stop"' in raw
+    assert "data: [DONE]" in raw
+

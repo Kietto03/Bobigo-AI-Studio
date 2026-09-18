@@ -73,6 +73,7 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
+<<<<<<< HEAD
 # 1. ASCII Art Banner
 clear || true
 echo ""
@@ -98,6 +99,23 @@ if command -v free >/dev/null 2>&1; then
 elif [ "$(uname)" = "Darwin" ]; then
     RAM_TOTAL=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f", $1/1073741824}')
     RAM_INFO="${RAM_TOTAL}GB (Apple Silicon / Mac)"
+=======
+# 0. Start PostgreSQL (Docker) — the app's data store
+if docker info >/dev/null 2>&1; then
+    echo "🐘 Starting PostgreSQL via Docker Compose..."
+    docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d db >/dev/null 2>&1
+    echo -n "⏳ Waiting for PostgreSQL..."
+    for i in {1..40}; do
+        if docker compose -f "$PROJECT_DIR/docker-compose.yml" exec -T db pg_isready -U bobigo -d bobigo >/dev/null 2>&1; then
+            echo -e "\n✅ PostgreSQL ready."
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+else
+    echo "⚠️  Docker daemon không chạy — bỏ qua Postgres. App sẽ chạy chế độ offline (IndexedDB cục bộ)."
+>>>>>>> origin/main
 fi
 
 CORES="8"
@@ -181,6 +199,7 @@ if [ -n "$RUNNING_MODEL" ]; then
     fi
 fi
 
+<<<<<<< HEAD
 format_display_name() {
     local name="$1"
     local max=36
@@ -192,6 +211,12 @@ format_display_name() {
         printf "%-36s" "${head}...${tail}"
     fi
 }
+=======
+# 2. Start Web UI Server on port 8000
+echo "🌐 Starting Web UI server on port 8000 (0.0.0.0)..."
+"$PYTHON" "$PROJECT_DIR/server.py" &
+SERVER_PID=$!
+>>>>>>> origin/main
 
 get_recommendation() {
     local name="$1"
@@ -211,6 +236,7 @@ get_recommendation() {
     fi
 }
 
+<<<<<<< HEAD
 if [ -z "$RUNNING_MODEL" ]; then
     TOTAL_COUNT=${#SORTED_MODELS[@]}
     if [ "$TOTAL_COUNT" -eq 0 ]; then
@@ -409,11 +435,16 @@ elif [ -n "$RUNNING_MODEL" ]; then
     DISPLAY_MODEL=$(basename "$RUNNING_MODEL")
 fi
 
+LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || ifconfig 2>/dev/null | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1)
+
 echo ""
 echo -e "  ${GREEN}╔═══════════════════════════════════════════════════════════════════════════╗${RESET}"
 echo -e "  ${GREEN}║               ✦  BOBIGO AI STUDIO 2.0 ĐÃ SẴN SÀNG  ✦                     ║${RESET}"
 echo -e "  ${GREEN}╠═══════════════════════════════════════════════════════════════════════════╣${RESET}"
 echo -e "  ${GREEN}║  🌐 Web Studio:     ${WHITE}http://localhost:8000                                 ${GREEN}║${RESET}"
+if [ -n "$LAN_IP" ]; then
+printf "  ${GREEN}║  🌐 LAN Studio:     ${WHITE}http://%-47s${GREEN}║${RESET}\n" "$LAN_IP:8000"
+fi
 echo -e "  ${GREEN}║  🤖 LLM Engine:     ${WHITE}http://127.0.0.1:11434 (OpenAI Compatible)            ${GREEN}║${RESET}"
 printf "  ${GREEN}║  🧠 Active Model:   ${CYAN}%-54s${GREEN}║${RESET}\n" "${DISPLAY_MODEL:0:50}"
 echo -e "  ${GREEN}║  ⌨ Điều khiển:      ${YELLOW}Nhấn [Ctrl + C] để dừng toàn bộ an toàn                 ${GREEN}║${RESET}"

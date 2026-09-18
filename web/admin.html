@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bobigo — Quản trị</title>
+    <link rel="icon" type="image/png" href="logo.png">
+    <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="light admin-body">
+<script>
+/* Apply the persisted theme before first paint so the admin console always
+   matches the theme chosen in the main app. Default: light (Daylight). */
+(function () {
+    try {
+        var MAP = { obsidian: ["dark"], daylight: ["light"], indigo: ["dark", "theme-indigo"],
+                    evergreen: ["dark", "theme-evergreen"], amethyst: ["dark", "theme-amethyst"],
+                    porcelain: ["light", "theme-porcelain"] };
+        var cls = MAP[localStorage.getItem("bobigo_theme")] || ["light"];
+        ["dark", "light", "theme-indigo", "theme-evergreen", "theme-amethyst", "theme-porcelain"]
+            .forEach(function (c) { document.body.classList.remove(c); });
+        cls.forEach(function (c) { document.body.classList.add(c); });
+    } catch (e) {}
+})();
+</script>
+    <header class="admin-topbar">
+        <div class="admin-brand"><img src="logo.png" alt="" class="admin-logo"> Bobigo <span class="divider">·</span> Quản trị hệ thống</div>
+        <div class="admin-actions">
+            <span id="admin-whoami" class="admin-whoami"></span>
+            <button id="admin-theme-toggle" class="admin-btn" title="Đổi giao diện sáng/tối">
+                <i class="fa-solid fa-sun sun-icon"></i><i class="fa-solid fa-moon moon-icon"></i>
+            </button>
+            <a href="/" class="admin-btn"><i class="fa-solid fa-arrow-left"></i> Về app</a>
+            <button id="admin-logout" class="admin-btn admin-btn-danger"><i class="fa-solid fa-right-from-bracket"></i> Đăng xuất</button>
+        </div>
+    </header>
+
+    <nav class="admin-tabs">
+        <button class="admin-tab active" data-tab="monitoring"><i class="fa-solid fa-chart-line"></i> Giám sát</button>
+        <button class="admin-tab" data-tab="governance"><i class="fa-solid fa-shield-halved"></i> Quản trị AI</button>
+        <button class="admin-tab" data-tab="apikeys"><i class="fa-solid fa-key"></i> Khóa API</button>
+        <button class="admin-tab" data-tab="users"><i class="fa-solid fa-users"></i> Người dùng</button>
+        <button class="admin-tab" data-tab="audit"><i class="fa-solid fa-clipboard-list"></i> Nhật ký</button>
+    </nav>
+
+    <main class="admin-main">
+        <!-- ═══════════════════════════════════════ -->
+        <!-- 1. MONITORING PANEL                     -->
+        <!-- ═══════════════════════════════════════ -->
+        <section data-panel="monitoring" class="admin-panel active">
+            <div class="panel-header-row">
+                <div>
+                    <h2 class="panel-title"><i class="fa-solid fa-network-wired"></i> Giám sát hệ thống</h2>
+                    <p class="panel-subtitle">Trạng thái Dual-Mac RPC Cluster, LLM Engine, cơ sở dữ liệu và lưu trữ</p>
+                </div>
+                <div class="panel-header-actions">
+                    <span id="mon-auto-tag" class="mon-live-tag"><span class="live-dot"></span> Live 5s</span>
+                    <button id="mon-refresh-btn" class="admin-btn-sm" title="Làm mới"><i class="fa-solid fa-rotate"></i> Làm mới</button>
+                </div>
+            </div>
+
+            <!-- ── Cluster Nodes ── -->
+            <div class="section-label"><i class="fa-solid fa-server"></i> Cụm máy chủ</div>
+            <div class="cluster-grid">
+                <div class="cluster-node" id="node-host">
+                    <div class="cluster-node-head">
+                        <div class="cluster-node-title">
+                            <span class="node-icon node-icon-host"><i class="fa-solid fa-server"></i></span>
+                            Host · Master
+                        </div>
+                        <span id="host-status-tag" class="status-pill status-online">Online</span>
+                    </div>
+                    <table class="prop-table">
+                        <tr><td class="prop-lbl">IP</td><td class="prop-val mono" id="host-ip">192.168.100.1</td></tr>
+                        <tr><td class="prop-lbl">GPU</td><td class="prop-val" id="host-gpu">Metal 3 (Local)</td></tr>
+                        <tr><td class="prop-lbl">RAM</td><td class="prop-val" id="host-ram">—</td></tr>
+                        <tr><td class="prop-lbl">Uptime</td><td class="prop-val" id="host-uptime">—</td></tr>
+                        <tr><td class="prop-lbl">Nền tảng</td><td class="prop-val" id="host-platform">—</td></tr>
+                    </table>
+                </div>
+
+                <div class="cluster-bridge">
+                    <div class="bridge-line"></div>
+                    <div class="bridge-badge">
+                        <i class="fa-solid fa-bolt"></i> Thunderbolt 40 Gbps
+                    </div>
+                    <div class="bridge-stats">
+                        <span class="bridge-stat" id="cluster-latency"><i class="fa-solid fa-stopwatch"></i> &lt;1ms</span>
+                        <span class="bridge-stat bridge-mode" id="cluster-mode-badge">RPC Metal</span>
+                    </div>
+                    <div class="bridge-line"></div>
+                </div>
+
+                <div class="cluster-node" id="node-worker">
+                    <div class="cluster-node-head">
+                        <div class="cluster-node-title">
+                            <span class="node-icon node-icon-worker"><i class="fa-solid fa-microchip"></i></span>
+                            Worker · Remote GPU
+                        </div>
+                        <span id="worker-status-tag" class="status-pill status-loading">...</span>
+                    </div>
+                    <table class="prop-table">
+                        <tr><td class="prop-lbl">IP</td><td class="prop-val mono" id="worker-ip">192.168.100.2:50052</td></tr>
+                        <tr><td class="prop-lbl">GPU</td><td class="prop-val">Metal Remote (ggml-rpc)</td></tr>
+                        <tr><td class="prop-lbl">Giao thức</td><td class="prop-val">llama.cpp RPC</td></tr>
+                        <tr><td class="prop-lbl">Ping</td><td class="prop-val" id="worker-ping">—</td></tr>
+                        <tr><td class="prop-lbl">Cổng</td><td class="prop-val" id="worker-port-status">—</td></tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ── KPI Cards ── -->
+            <div class="section-label"><i class="fa-solid fa-gauge-high"></i> Chỉ số vận hành</div>
+            <div class="kpi-row">
+                <div class="kpi-card">
+                    <div class="kpi-icon kpi-icon-llm"><i class="fa-solid fa-brain"></i></div>
+                    <div class="kpi-body">
+                        <div class="kpi-label">Mô hình LLM</div>
+                        <div class="kpi-value" id="llm-model-name">—</div>
+                        <div class="kpi-sub" id="llm-model-meta">Đang tải…</div>
+                        <div class="kpi-tags" id="llm-tags">
+                            <span class="kpi-tag"><i class="fa-solid fa-cube"></i> <span id="llm-params">—</span></span>
+                            <span class="kpi-tag"><i class="fa-solid fa-compress"></i> <span id="llm-quant">—</span></span>
+                            <span class="kpi-tag"><i class="fa-solid fa-layer-group"></i> <span id="llm-ctx">—</span></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-card">
+                    <div class="kpi-icon kpi-icon-db"><i class="fa-solid fa-database"></i></div>
+                    <div class="kpi-body">
+                        <div class="kpi-label">PostgreSQL</div>
+                        <div class="kpi-value" id="db-status-val">Đang kết nối</div>
+                        <div class="kpi-sub" id="db-conn-meta">Dữ liệu quan hệ</div>
+                        <div class="kpi-stats">
+                            <span><strong id="db-users-cnt">0</strong> người dùng</span>
+                            <span><strong id="db-sessions-cnt">0</strong> hội thoại</span>
+                            <span><strong id="db-msgs-cnt">0</strong> tin nhắn</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-card">
+                    <div class="kpi-icon kpi-icon-storage"><i class="fa-solid fa-hard-drive"></i></div>
+                    <div class="kpi-body">
+                        <div class="kpi-label">Lưu trữ</div>
+                        <div class="kpi-value" id="storage-mb">0 MB</div>
+                        <div class="kpi-sub"><span id="storage-files-cnt">0</span> tệp sinh ra</div>
+                        <div class="kpi-stats">
+                            <span><strong id="db-projects-cnt">0</strong> dự án</span>
+                            <span><strong id="db-companions-cnt">0</strong> companions</span>
+                            <span><strong id="db-audit-cnt">0</strong> audit</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!-- 2. GOVERNANCE PANEL                     -->
+        <!-- ═══════════════════════════════════════ -->
+        <section data-panel="governance" class="admin-panel">
+            <div class="panel-header-row">
+                <div>
+                    <h2 class="panel-title"><i class="fa-solid fa-shield-halved"></i> Quản trị AI &amp; An toàn dữ liệu</h2>
+                    <p class="panel-subtitle">Kiểm soát PII, chính sách bảo mật, công cụ Agent và tuân thủ</p>
+                </div>
+                <div class="panel-header-actions">
+                    <button id="gov-refresh-btn" class="admin-btn-sm"><i class="fa-solid fa-rotate"></i> Cập nhật</button>
+                </div>
+            </div>
+
+            <!-- KPI strip -->
+            <div class="gov-kpi-strip">
+                <div class="gov-kpi">
+                    <div class="gov-kpi-num" id="gov-total-docs">0</div>
+                    <div class="gov-kpi-lbl">Tài liệu quét</div>
+                    <div class="gov-kpi-sub"><span id="gov-ocr-docs">0</span> qua OCR</div>
+                </div>
+                <div class="gov-kpi-divider"></div>
+                <div class="gov-kpi">
+                    <div class="gov-kpi-num text-warning" id="gov-total-pii">0</div>
+                    <div class="gov-kpi-lbl">PII phát hiện</div>
+                    <div class="gov-kpi-sub">Email, CCCD, SĐT</div>
+                </div>
+                <div class="gov-kpi-divider"></div>
+                <div class="gov-kpi">
+                    <div class="gov-kpi-num text-success" id="gov-redaction-rate">100%</div>
+                    <div class="gov-kpi-lbl">Tỷ lệ redaction</div>
+                    <div class="gov-kpi-sub">Tự động trước LLM</div>
+                </div>
+                <div class="gov-kpi-divider"></div>
+                <div class="gov-kpi">
+                    <div class="gov-kpi-num"><i class="fa-solid fa-lock"></i> Local</div>
+                    <div class="gov-kpi-lbl">100% xử lý nội bộ</div>
+                    <div class="gov-kpi-sub">Không gửi ra Cloud</div>
+                </div>
+            </div>
+
+            <!-- Sensitivity & PII side-by-side -->
+            <div class="gov-two-col">
+                <div class="gov-card">
+                    <h3 class="gov-card-title"><i class="fa-solid fa-tags"></i> Phân loại độ nhạy cảm</h3>
+                    <div class="sens-bars-container" id="gov-sens-bars"></div>
+                </div>
+                <div class="gov-card">
+                    <h3 class="gov-card-title"><i class="fa-solid fa-user-shield"></i> Danh mục PII nhận diện</h3>
+                    <div class="pii-types-container" id="gov-pii-types"></div>
+                </div>
+            </div>
+
+            <!-- Tools table -->
+            <div class="gov-card">
+                <h3 class="gov-card-title"><i class="fa-solid fa-sliders"></i> Quản trị công cụ Agent</h3>
+                <div class="admin-table-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Công cụ</th>
+                                <th>Cơ chế bảo vệ</th>
+                                <th>Rủi ro</th>
+                                <th>Trạng thái</th>
+                            </tr>
+                        </thead>
+                        <tbody id="gov-tools-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Compliance -->
+            <div class="gov-card">
+                <h3 class="gov-card-title"><i class="fa-solid fa-certificate"></i> Tuân thủ &amp; bảo mật</h3>
+                <div class="compliance-grid" id="gov-compliance-list"></div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!-- 3. API KEYS PANEL                       -->
+        <!-- ═══════════════════════════════════════ -->
+        <section data-panel="apikeys" class="admin-panel">
+            <div class="panel-header-row" style="margin-bottom:16px">
+                <div>
+                    <h2 class="panel-title"><i class="fa-solid fa-key"></i> Quản lý Khóa API (API Keys)</h2>
+                    <p class="panel-subtitle">Tạo và quản trị API Key để người dùng/ứng dụng bên ngoài (Python SDK, curl, Open WebUI, Cursor) dùng thử</p>
+                </div>
+            </div>
+            <form id="create-key-form" class="admin-create">
+                <input id="ck-name" placeholder="Tên khóa (vd: Dùng thử, Dev App, Postman...)" autocomplete="off" required>
+                <input id="ck-custom" placeholder="Key tùy chỉnh (tùy chọn, vd: sk-bobigo-...)" autocomplete="off">
+                <button type="submit"><i class="fa-solid fa-plus"></i> Tạo API Key mới</button>
+                <span id="ck-msg" class="cu-msg"></span>
+            </form>
+            <div id="keys-table" class="admin-table-wrap"></div>
+        </section>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!-- 4. USERS PANEL                          -->
+        <!-- ═══════════════════════════════════════ -->
+        <section data-panel="users" class="admin-panel">
+            <div class="panel-header-row" style="margin-bottom:16px">
+                <div>
+                    <h2 class="panel-title"><i class="fa-solid fa-users"></i> Quản lý người dùng</h2>
+                    <p class="panel-subtitle">Tạo, khoá và quản trị tài khoản</p>
+                </div>
+            </div>
+            <form id="create-user-form" class="admin-create">
+                <input id="cu-username" placeholder="Tên đăng nhập" autocomplete="off" required>
+                <input id="cu-password" type="text" placeholder="Mật khẩu" autocomplete="off" required>
+                <select id="cu-role">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button type="submit"><i class="fa-solid fa-plus"></i> Tạo tài khoản</button>
+                <span id="cu-msg" class="cu-msg"></span>
+            </form>
+            <div id="users-table" class="admin-table-wrap"></div>
+        </section>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!-- 4. AUDIT LOGS PANEL                     -->
+        <!-- ═══════════════════════════════════════ -->
+        <section data-panel="audit" class="admin-panel">
+            <div class="panel-header-row" style="margin-bottom:16px">
+                <div>
+                    <h2 class="panel-title"><i class="fa-solid fa-clipboard-list"></i> Nhật ký xử lý tài liệu</h2>
+                    <p class="panel-subtitle">Lịch sử tải lên, OCR và trích xuất</p>
+                </div>
+            </div>
+            <div id="audit-table" class="admin-table-wrap"></div>
+        </section>
+    </main>
+
+    <script src="js/admin.js"></script>
+</body>
+</html>
