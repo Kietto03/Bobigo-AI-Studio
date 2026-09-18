@@ -10,7 +10,7 @@ import { API_URL, performWebSearch, postCompress, postTokenize, postSessionMessa
 import { activateFocusTrap, deactivateFocusTrap } from "./features/focusTrap.js";
 import { createAppearance } from "./features/appearance.js";
 import { refreshSettingsCatalog, wireMcpReconnect } from "./features/toolsPanel.js";
-import { conversationTokens, estimateTokens } from "./tokens.js";
+import { calculateTokenBreakdown, conversationTokens, estimateTokens, setMessageCachedTokens } from "./tokens.js";
 import { createHealthController } from "./features/healthPanel.js";
 import { initContextMeter } from "./features/contextMeter.js";
 import { initMessageSearch } from "./features/messageSearch.js";
@@ -104,9 +104,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     let activeGenerations = new Map(); // sessionId -> { abortController, assistantMsgObj }
     let llmReady = false;
     let currentModel = "qwen35b-uncensored"; // updated from /api/health once known
-    let contextInfo = { window: 8192, reserve: 2048 }; // from /api/health
+    let contextInfo = { window: 16384, reserve: 4096 }; // from /api/health
     let isCompressing = false;
     let contextMeter = null; // assigned once DOM refs exist (see init below)
+    let health = null; // assigned once DOM refs and controller exist
     const _durableQueue = []; // messages awaiting incremental server append
 
     // Icon/label per generated-file kind. Declared early (before initSessions →
@@ -244,46 +245,63 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     }
 
-    // Initialize App
-    initTheme();
-    initStyle();
-    initConfigUI();
-    initSessions();
-    initCompanions();
-    initProjects();
-    syncWebSearchUI();
-    applyLanguage(config.language || "vi");
-    checkHealth();
-    setInterval(checkHealth, 10000);
-
     // --------------------------------------------------------------------------
     // Context meter + auto-compression
     // --------------------------------------------------------------------------
+    let _ctxTokenTimer = 0;
     contextMeter = initContextMeter({
         root: document.getElementById("context-meter"),
         fill: document.getElementById("ctx-fill"),
         text: document.getElementById("ctx-text"),
+        popover: document.getElementById("ctx-popover"),
+        compressBtn: document.getElementById("ctx-compress-btn"),
         getBudget: () => contextInfo.window - contextInfo.reserve,
+        onCompress: () => {
+            if (!llmReady) return;
+            compressSession(getActiveSession(), { silent: false });
+        },
     });
-    updateContextMeter();
 
-    function currentSystemPrompt() {
+    function extractPinnedContext(session, lang) {
+        if (!session || !Array.isArray(session.messages)) return "";
+        const pinnedMsgs = session.messages.filter(
+            (m) => m && m.pinned && typeof m.content === "string" && m.content.trim()
+        );
+        if (pinnedMsgs.length === 0) return "";
+        const i18n = window.BobigoI18n;
+        const header = (i18n && i18n.t(lang, "pinnedContext")) || (lang === "en" ? "Pinned Key Facts (Working Memory):" : "Thông tin quan trọng đã ghim (bộ nhớ làm việc):");
+        const lines = pinnedMsgs.map((m) => {
+            const roleLabel = m.role === "user"
+                ? (lang === "en" ? "User note" : "Ghi chú người dùng")
+                : (lang === "en" ? "AI response" : "Phản hồi AI");
+            const clean = m.content.trim();
+            const snippet = clean.length > 600 ? clean.slice(0, 597) + "…" : clean;
+            return `• [${roleLabel}]: ${snippet}`;
+        });
+        return `[${header}]\n${lines.join("\n")}`;
+    }
+
+    function currentSystemPrompt(sessionOverride) {
+        const s = sessionOverride || getActiveSession();
+        let sp = "";
         if (appMode === "companion") {
-            const c = getActiveSession();
-            return (c && window.BobigoCompanions)
-                ? BobigoCompanions.buildSystemPrompt(c, { contextWindow: contextInfo.window, reserve: contextInfo.reserve })
+            sp = (s && window.BobigoCompanions)
+                ? BobigoCompanions.buildSystemPrompt(s, { contextWindow: contextInfo.window, reserve: contextInfo.reserve })
                 : "";
+        } else {
+            sp = config.systemPrompt || "";
+            if (s && s.projectId && window.BobigoProjects) {
+                const proj = projects.find((p) => p.id === s.projectId);
+                if (proj) sp = (sp + "\n\n" + BobigoProjects.buildContext(proj, { contextWindow: contextInfo.window, reserve: contextInfo.reserve, language: config.language })).trim();
+            }
         }
-        let sp = config.systemPrompt || "";
-        const s = getActiveSession();
-        if (s && s.projectId && window.BobigoProjects) {
-            const proj = projects.find((p) => p.id === s.projectId);
-            if (proj) sp = (sp + "\n\n" + BobigoProjects.buildContext(proj, { contextWindow: contextInfo.window, reserve: contextInfo.reserve, language: config.language })).trim();
+        const pinnedBlock = extractPinnedContext(s, config.language);
+        if (pinnedBlock) {
+            sp = (sp + "\n\n" + pinnedBlock).trim();
         }
         return sp;
     }
 
-    let _ctxTokenTimer = 0;
     function updateContextMeter() {
         if (!contextMeter) return; // not yet initialized (early renders during boot)
         const session = getActiveSession();
@@ -295,8 +313,8 @@ document.addEventListener("DOMContentLoaded", async () => {
             try {
                 const s = getActiveSession();
                 const sys = currentSystemPrompt();
-                const blob = (sys ? sys + "\n" : "") +
-                    ((s && s.messages) || []).map((m) => m.content || "").join("\n");
+                const msgs = (s && s.messages) || [];
+                const blob = (sys ? sys + "\n" : "") + msgs.map((m) => m.content || "").join("\n");
                 if (!blob) return;
                 const res = await postTokenize(blob);
                 if (res && res.exact) {
@@ -306,13 +324,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         }, 700);
     }
 
-    const COMPRESS_KEEP_RECENT = 4; // last N messages kept verbatim
+    const COMPRESS_KEEP_RECENT = 8; // keep last 8 messages (4 Q&A pairs) verbatim
+    const COMPRESS_COOLDOWN_TURNS = 6; // minimum new messages required before next auto-compression
+
+    function shouldAutoCompress(session) {
+        if (!config.memory || isCompressing || !session || !Array.isArray(session.messages)) return false;
+        if (session.messages.length <= COMPRESS_KEEP_RECENT + 2) return false;
+        if (typeof session.lastCompressedAt === "number" && (session.messages.length - session.lastCompressedAt) < COMPRESS_COOLDOWN_TURNS) {
+            return false;
+        }
+        const budget = Math.max(512, contextInfo.window - contextInfo.reserve);
+        const used = conversationTokens(session.messages, currentSystemPrompt(session));
+        return used >= (budget * 0.90);
+    }
 
     async function maybeAutoCompress(session) {
-        if (!config.memory || isCompressing || !session) return;
-        const budget = Math.max(512, contextInfo.window - contextInfo.reserve);
-        const used = conversationTokens(session.messages, currentSystemPrompt());
-        if (used < budget * 0.9) return;
+        if (!shouldAutoCompress(session)) return;
         await compressSession(session, { silent: true });
     }
 
@@ -320,9 +347,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (isCompressing || !session || !Array.isArray(session.messages)) return;
         if (session.messages.length <= COMPRESS_KEEP_RECENT + 1) return;
         isCompressing = true;
+        contextMeter?.setCompressing(true);
         try {
             const head = session.messages.slice(0, session.messages.length - COMPRESS_KEEP_RECENT);
             const tail = session.messages.slice(session.messages.length - COMPRESS_KEEP_RECENT);
+            const pinnedInHead = head.filter((m) => m && m.pinned);
             const i18n = window.BobigoI18n;
             const lang = config.language || "vi";
             const res = await postCompress(head, { keepRecent: 0, language: lang, model: currentModel });
@@ -335,7 +364,8 @@ document.addEventListener("DOMContentLoaded", async () => {
                 count: res.compressed_count || head.length,
                 createdAt: new Date().toISOString(),
             };
-            session.messages = [node, ...tail];
+            session.messages = [node, ...pinnedInHead, ...tail];
+            session.lastCompressedAt = session.messages.length;
             saveSessions();
             if (currentSessionId === session.id) {
                 renderCurrentSession();
@@ -350,13 +380,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             }
         } finally {
             isCompressing = false;
+            contextMeter?.setCompressing(false);
         }
     }
-
-    document.getElementById("ctx-compress-btn")?.addEventListener("click", () => {
-        if (!llmReady) return;
-        compressSession(getActiveSession(), { silent: false });
-    });
 
     // --------------------------------------------------------------------------
     // In-conversation search + pinned filter
@@ -708,7 +734,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const statusLabel = document.getElementById("status-label");
     const statusBanner = document.getElementById("status-banner");
 
-    const health = createHealthController({
+    health = createHealthController({
         els: { statusLabel, statusDot, statusBanner },
         getLanguage: () => config.language || "vi",
         onApplied: (data, ready) => {
@@ -721,7 +747,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             if (data && Number.isFinite(data.reply_reserve)) contextInfo.reserve = data.reply_reserve;
             updateContextMeter();
             if (!isGenerating) {
-                sendBtn.disabled = userInput.value.trim() === "" || !ready;
+                sendBtn.disabled = (userInput.value.trim() === "" && (!attachedFiles || attachedFiles.length === 0)) || !ready;
             }
             const i18n = window.BobigoI18n;
             const lang = config.language || "vi";
@@ -734,14 +760,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     function applyHealth(data) {
         // Thin delegate — onApplied() inside the controller syncs llmReady,
         // currentModel, contextInfo and repaints the context meter.
+        if (!health) return;
         health.applyHealth(data);
     }
 
     function updateHealthSpeedDisplay(tps) {
+        if (!health) return;
         health.updateHealthSpeedDisplay(tps);
     }
 
     async function checkHealth() {
+        if (!health) return;
         await health.checkHealth();
     }
 
@@ -2198,8 +2227,27 @@ document.addEventListener("DOMContentLoaded", async () => {
             }
         }
 
-        // Auto-compress older turns when the window is nearly full (persisted once).
-        await maybeAutoCompress(targetSession);
+        // Auto-compress older turns when the window is nearly full (with visual indicator)
+        const needCompress = shouldAutoCompress(targetSession);
+
+        let compressingRow = null;
+        if (needCompress && currentSessionId === targetSessionId) {
+            compressingRow = createMessageElement("assistant", "");
+            const compressingBubble = compressingRow.querySelector(".bubble");
+            const i18n = window.BobigoI18n;
+            const lang = config.language || "vi";
+            const msg = (i18n && i18n.t(lang, "compressingNote")) || "Đang tối ưu hoá bộ nhớ hội thoại…";
+            compressingBubble.innerHTML = `<span style="color: var(--brand, #ef233c); font-size: 0.85rem;"><i class="fa-solid fa-compress fa-spin"></i> ${escapeHtml(msg)}</span>`;
+            messagesContainer.appendChild(compressingRow);
+            scrollToBottom();
+        }
+        try {
+            await maybeAutoCompress(targetSession);
+        } finally {
+            if (compressingRow && compressingRow.parentElement) {
+                messagesContainer.removeChild(compressingRow);
+            }
+        }
 
         // --- Web Search Phase (only when agent tools are off) ---
         let searchResults = [];
@@ -2282,12 +2330,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                 ? BobigoCompanions.buildSystemPrompt(targetSession, { contextWindow: contextInfo.window, reserve: contextInfo.reserve })
                 : "";
         } else {
-            systemContent = config.systemPrompt || "";
-            const proj = targetSession.projectId && window.BobigoProjects ? projects.find((p) => p.id === targetSession.projectId) : null;
-            if (proj) {
-                const ctx = BobigoProjects.buildContext(proj, { contextWindow: contextInfo.window, reserve: contextInfo.reserve, language: config.language });
-                systemContent = (systemContent + "\n\n" + ctx).trim();
-            }
+            systemContent = currentSystemPrompt(targetSession);
         }
         const messagesPayload = [{ role: "system", content: systemContent }, ...messageContext];
 
@@ -3051,4 +3094,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         renderCurrentSession();
         setModeLabel();
     }
+
+    // --------------------------------------------------------------------------
+    // Initialize App
+    // --------------------------------------------------------------------------
+    initTheme();
+    initStyle();
+    initConfigUI();
+    initSessions();
+    initCompanions();
+    initProjects();
+    syncWebSearchUI();
+    applyLanguage(config.language || "vi");
+    updateContextMeter();
+    checkHealth();
+    setInterval(checkHealth, 10000);
 });

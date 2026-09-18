@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from backend.agent.loop import stream_agent
+from backend.agent.loop import prepare_messages, stream_agent
 from backend.agent.parse import extract_tool_calls_from_text
 from backend.config import MAX_AGENT_ITERATIONS
 
@@ -194,3 +194,79 @@ def test_stops_before_second_iteration_when_cancelled():
         assert "giới hạn" not in text   # clean stop, not a cap message
 
     asyncio.run(main())
+
+
+def test_finish_reason_length_during_reasoning_appends_notice():
+    """When model halts during reasoning with finish_reason length, append warning notice."""
+    async def llm(_payload):
+        yield {"choices": [{"delta": {"reasoning_content": "đang suy luận dở dang..."}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    async def tools(_n, _a):
+        pass
+
+    raw = _collect({"messages": [{"role": "user", "content": "câu hỏi dài"}]}, llm, tools)
+    events = _events(raw)
+    assert any("đang suy luận dở dang..." in (e.get("choices", [{}])[0].get("delta", {}).get("reasoning_content", "")) for e in events)
+    # Must contain warning notice in content
+    assert any("giới hạn ngữ cảnh" in (e.get("choices", [{}])[0].get("delta", {}).get("content", "")) for e in events)
+    assert "data: [DONE]" in raw
+
+
+def test_finish_reason_length_during_answer_appends_notice():
+    """When model halts during answer with finish_reason length, append warning notice."""
+    async def llm(_payload):
+        yield {"choices": [{"delta": {"content": "đáp án là:"}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    async def tools(_n, _a):
+        pass
+
+    raw = _collect({"messages": [{"role": "user", "content": "câu hỏi dài"}]}, llm, tools)
+    events = _events(raw)
+    assert any("đáp án là:" in (e.get("choices", [{}])[0].get("delta", {}).get("content", "")) for e in events)
+    assert any("giới hạn ngữ cảnh" in (e.get("choices", [{}])[0].get("delta", {}).get("content", "")) for e in events)
+    assert "data: [DONE]" in raw
+
+
+def test_emergency_pruning_on_http_400():
+    """When llama-server rejects prompt with HTTP 400 (context overflow), agent prunes and retries."""
+    import httpx
+
+    attempt = {"count": 0}
+
+    async def llm(payload):
+        attempt["count"] += 1
+        if attempt["count"] == 1:
+            req = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
+            resp = httpx.Response(400, request=req, text="request (8762 tokens) exceeds the available context size (8192 tokens)")
+            raise httpx.HTTPStatusError("Context overflow", request=req, response=resp)
+        # Second attempt succeeds after pruning
+        yield {"choices": [{"delta": {"content": "câu trả lời sau khi nén ngữ cảnh"}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+    async def tools(_n, _a):
+        pass
+
+    raw = _collect({"messages": [{"role": "user", "content": "câu hỏi lớn"}]}, llm, tools)
+    assert attempt["count"] == 2
+    assert "câu trả lời sau khi nén ngữ cảnh" in raw
+    assert "data: [DONE]" in raw
+
+
+def test_prepare_messages_preserves_multiple_system_messages():
+    """Verify that memory nodes and secondary system messages are merged rather than dropped."""
+    msgs = [
+        {"role": "system", "content": "You are Bobigo AI."},
+        {"role": "system", "content": "[Memory Note]\n- User prefers TypeScript.\n- Database port is 5433."},
+        {"role": "user", "content": "What was the database port?"},
+    ]
+    prepared = prepare_messages(msgs, agent_tools=True)
+    # Must contain 1 primary system message followed by user messages
+    assert len(prepared) == 2
+    sys_content = prepared[0]["content"]
+    assert "You are Bobigo AI." in sys_content
+    assert "[Memory Note]" in sys_content
+    assert "Database port is 5433" in sys_content
+    assert prepared[1]["role"] == "user"
+

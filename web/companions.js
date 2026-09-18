@@ -86,7 +86,7 @@
     function buildSystemPrompt(c, opts) {
         opts = opts || {};
         const lang = c && c.language === "en" ? "en" : "vi";
-        const budget = Math.max(512, (opts.contextWindow || 8192) - (opts.reserve || 2048));
+        const budget = Math.max(512, (opts.contextWindow || 16384) - (opts.reserve || 4096));
         const kcap = Math.floor(budget * 0.45); // knowledge ≤ ~45% of the window
         const lines = [];
         const name = (c && c.name) || (lang === "en" ? "a companion" : "một người bạn đồng hành");

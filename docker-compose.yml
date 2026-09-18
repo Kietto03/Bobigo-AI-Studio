@@ -31,16 +31,15 @@ services:
   #   LLM_BASE_URL=http://192.168.1.10:11434 docker compose --profile full up -d
   # ------------------------------------------------------------------
   app:
-    profiles: ["full"]
     build: .
     container_name: bobigo-app
     restart: unless-stopped
     environment:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
       DATABASE_URL: postgresql://bobigo:bobigo@db:5432/bobigo
-      CONTEXT_WINDOW: ${CONTEXT_WINDOW:-8192}
+      CONTEXT_WINDOW: ${CONTEXT_WINDOW:-16384}
     ports:
-      - "127.0.0.1:8000:8000"
+      - "0.0.0.0:8000:8000"
     depends_on:
       db:
         condition: service_healthy

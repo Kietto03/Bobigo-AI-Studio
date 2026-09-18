@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.agent.compress import summarize_messages
 from backend.agent.loop import stream_agent
 from backend.config import (
+    DEFAULT_MODEL,
     HOST,
     LLM_BASE_URL,
     LLM_TIMEOUT,
@@ -29,6 +30,11 @@ from backend.mcp import MCPManager
 from backend.tools import SCHEMAS
 from backend.tools.genfiles import cleanup_generated
 from backend.tools.web_search import duckduckgo_search
+from backend.models_manager import (
+    list_available_models,
+    start_llama_server,
+    terminate_llama_server,
+)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -67,9 +73,20 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001 — MCP is optional, never block startup
             log.exception("MCP manager failed to start")
         app.state.mcp = mcp
+
+        # Auto-launch default model if llama-server is not already running
+        try:
+            health_check = await probe_llm(client)
+            if not health_check.get("llm_ready"):
+                log.info("llama-server is not running; starting default model: %s", DEFAULT_MODEL)
+                start_llama_server(DEFAULT_MODEL)
+        except Exception:
+            log.exception("Error checking or starting llama-server on startup")
+
         try:
             yield
         finally:
+            terminate_llama_server()
             await mcp.aclose()
             if app.state.db is not None:
                 await app.state.db.close()
@@ -151,6 +168,30 @@ async def health(request: Request):
 @app.get("/v1/models")
 async def list_models(request: Request):
     return await _proxy_stream(request, "/v1/models")
+
+
+@app.get("/api/models")
+async def get_models(request: Request):
+    models = list_available_models()
+    return {
+        "models": models,
+        "default_model": DEFAULT_MODEL,
+    }
+
+
+@app.post("/api/models/select")
+async def select_model_endpoint(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Dữ liệu JSON không hợp lệ"}, status_code=400)
+    model_name = (data.get("model") or "").strip()
+    if not model_name:
+        return JSONResponse({"error": "Chưa chỉ định tên mô hình"}, status_code=400)
+    success = start_llama_server(model_name)
+    if not success:
+        return JSONResponse({"error": f"Không thể khởi chạy mô hình {model_name}"}, status_code=500)
+    return {"status": "starting", "model": model_name}
 
 
 def _builtin_catalog() -> list[dict[str, Any]]:
@@ -353,6 +394,35 @@ async def compress_conversation(request: Request):
     return {"summary": summary, "compressed_count": len(to_summarize)}
 
 
+@app.get("/api/models")
+async def get_models(request: Request):
+    available = list_available_models()
+    health_data = await probe_llm(request.app.state.http)
+    current_active = health_data.get("model", "")
+    return {
+        "models": available,
+        "active": current_active,
+    }
+
+
+@app.post("/api/models/select")
+async def select_model(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    model = (data.get("model") or "").strip()
+    if not model:
+        return JSONResponse({"error": "Missing model filename"}, status_code=400)
+
+    success = start_llama_server(model)
+    if not success:
+        return JSONResponse({"error": f"Failed to start model {model}"}, status_code=500)
+
+    return {"status": "success", "message": f"Starting model {model}"}
+
+
 # --------------------------------------------------------------------------- #
 # Persistence store (PostgreSQL). Single-user: no scoping. The client keeps the
 # whole collection in memory and PUTs it back (debounced); we reconcile it into
@@ -507,6 +577,17 @@ async def chat_completions(request: Request):
 
     agent_tools = body.pop("agent_tools", True)
     if agent_tools is False:
+        # Consolidate system messages (memory/pinned) and trim to context window
+        from backend.agent.context import trim_messages
+        from backend.agent.loop import prepare_messages
+        from backend.health import get_active_context_window, get_active_reply_reserve
+
+        ctx_window = get_active_context_window()
+        reserve = int(body.get("max_tokens") or get_active_reply_reserve())
+        reserve = max(256, min(reserve, ctx_window - 512))
+        prepared_msgs = prepare_messages(list(body.get("messages") or []), agent_tools=False)
+        body["messages"] = trim_messages(prepared_msgs, window=ctx_window, reserve=reserve)
+
         # Re-wrap body without the extra field for a transparent proxy
         async def _raw_proxy():
             client: httpx.AsyncClient = request.app.state.http

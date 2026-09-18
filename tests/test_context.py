@@ -53,3 +53,40 @@ def test_trim_reinserts_user_when_only_tool_remains():
 
 def test_estimate_tokens_positive():
     assert estimate_tokens("abcd") >= 1
+
+
+def test_vietnamese_token_estimation():
+    vi_text = "Hôm nay tôi muốn hỏi về cách tối ưu hoá mô hình trí tuệ nhân tạo."
+    ascii_text = "Today I want to ask about optimizing the artificial intelligence model."
+    # Vietnamese with diacritics should produce conservative token estimates
+    vi_tokens = estimate_tokens(vi_text)
+    assert vi_tokens > len(vi_text) // 4
+
+
+def test_trim_caps_giant_user_message():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "Rất dài " * 5000},
+    ]
+    trimmed = trim_messages(messages, window=8192, reserve=2048)
+    user_msg = next(m for m in trimmed if m["role"] == "user")
+    assert "lược bớt" in user_msg["content"]
+
+
+def test_trim_preserves_tool_cluster():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "câu hỏi cũ " * 500},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "function": {"name": "f1"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "res1"},
+        {"role": "assistant", "content": "kết quả 1"},
+        {"role": "user", "content": "câu hỏi mới"},
+    ]
+    trimmed = trim_messages(messages, window=1000, reserve=200)
+    # Ensure no orphan tool message survived without its assistant
+    for i, m in enumerate(trimmed):
+        if m.get("role") == "tool":
+            prev = trimmed[i - 1]
+            assert prev.get("role") == "assistant"
+            assert any(tc.get("id") == m.get("tool_call_id") for tc in (prev.get("tool_calls") or []))
+

@@ -6,8 +6,8 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
-# Server — loopback by default so local tools are not reachable on LAN
-HOST = os.environ.get("HOST", "127.0.0.1")
+# Server — 0.0.0.0 to allow access from local network (LAN / VPN)
+HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
 # LLM Backend (llama-server)
@@ -20,7 +20,9 @@ DATABASE_URL = os.environ.get(
 )
 
 # Agent defaults
-DEFAULT_MODEL = "qwen35b-uncensored"
+DEFAULT_MODEL = os.environ.get(
+    "DEFAULT_MODEL", "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
+)
 DEFAULT_SYSTEM_PROMPT = (
     "Bạn là Bobigo, trợ lý AI. Trả lời chính xác, hữu ích và thân thiện."
 )
@@ -56,6 +58,8 @@ GENERATED_TTL_HOURS = float(os.environ.get("GENERATED_TTL_HOURS", "72"))
 # Logging verbosity for the backend ("DEBUG"|"INFO"|"WARNING"|...).
 LOG_LEVEL = os.environ.get("BOBIGO_LOG_LEVEL", "INFO").upper()
 
-CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "8192"))
-REPLY_RESERVE = 2048
+CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "16384"))
+REPLY_RESERVE = int(os.environ.get("REPLY_RESERVE", "4096"))
 TOOL_RESULT_CAP = 2500
+
+

@@ -81,3 +81,30 @@ def test_health_exposes_context_window():
         data = c.get("/api/health").json()
         assert isinstance(data.get("context_window"), int)
         assert isinstance(data.get("reply_reserve"), int)
+
+
+def test_extract_existing_memory_and_incremental_summarize():
+    from backend.agent.compress import extract_existing_memory, is_memory_node
+
+    memory_node = {
+        "role": "system",
+        "content": "[Bản ghi nhớ]\n- Người dùng tên là An, thích màu xanh",
+        "summary": True,
+    }
+    assert is_memory_node(memory_node) is True
+    assert "Người dùng tên là An" in extract_existing_memory([memory_node])
+
+    # Test incremental update
+    new_turns = [
+        memory_node,
+        {"role": "user", "content": "Bây giờ tôi muốn học thêm về Rust."},
+        {"role": "assistant", "content": "Rust là ngôn ngữ hệ thống an toàn."},
+    ]
+    client = _FakeClient("- Người dùng tên An, thích màu xanh\n- Đang học thêm về Rust")
+    summary = asyncio.run(summarize_messages(new_turns, client, language="vi"))
+    assert "Rust" in summary
+    sent_prompt = client.sent[0]["messages"][1]["content"]
+    assert "BẢN GHI NHỚ HIỆN TẠI" in sent_prompt
+    assert "Người dùng tên là An" in sent_prompt
+    assert "Bây giờ tôi muốn học thêm về Rust" in sent_prompt
+

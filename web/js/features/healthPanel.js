@@ -61,6 +61,7 @@ export function createHealthController({ els = {}, getLanguage, onApplied }) {
         if (hLatency) hLatency.textContent = (data && Number.isFinite(data.latency)) ? `${data.latency} ms` : "—";
         if (hJinja) hJinja.textContent = data && data.jinja_known ? (data.jinja ? "✓" : "✗") : "?";
         if (hCtx) hCtx.textContent = (data && data.context_window) ? data.context_window.toLocaleString() : "—";
+        syncModelSelect(data && data.model);
         updateHealthSpeedDisplay();
         // Let the app react (model name, context budget, send-button state…).
         if (onApplied) onApplied(data || {}, llmReady);
@@ -116,5 +117,101 @@ export function createHealthController({ els = {}, getLanguage, onApplied }) {
         });
     }
 
-    return { applyHealth, checkHealth, updateHealthSpeedDisplay };
+    let availableModels = [];
+
+    function syncModelSelect(currentModelName) {
+        const select = document.getElementById("model-select");
+        const sizeSpan = document.getElementById("model-select-size");
+        if (!select || !currentModelName) return;
+        for (let i = 0; i < select.options.length; i++) {
+            const opt = select.options[i];
+            if (opt.value === currentModelName || currentModelName.includes(opt.value)) {
+                if (select.selectedIndex !== i) {
+                    select.selectedIndex = i;
+                }
+                const found = availableModels.find(m => m.filename === opt.value);
+                if (sizeSpan && found) {
+                    sizeSpan.textContent = `${found.size_gb} GB`;
+                }
+                break;
+            }
+        }
+    }
+
+    async function loadModelsList() {
+        const select = document.getElementById("model-select");
+        const sizeSpan = document.getElementById("model-select-size");
+        if (!select) return;
+
+        try {
+            const res = await fetch("/api/models");
+            if (!res.ok) return;
+            const data = await res.json();
+            availableModels = data.models || [];
+            if (!availableModels.length) return;
+
+            select.innerHTML = "";
+            availableModels.forEach((m) => {
+                const opt = document.createElement("option");
+                opt.value = m.filename;
+                const isDef = m.is_default ? " (Mặc định)" : "";
+                opt.textContent = `${m.filename} (${m.size_gb} GB)${isDef}`;
+                if (m.is_default) {
+                    opt.selected = true;
+                    if (sizeSpan) sizeSpan.textContent = `${m.size_gb} GB`;
+                }
+                select.appendChild(opt);
+            });
+        } catch (e) {
+            console.debug("Unable to fetch /api/models:", e);
+        }
+    }
+
+    function initModelSwitcher() {
+        const select = document.getElementById("model-select");
+        const sizeSpan = document.getElementById("model-select-size");
+        if (!select) return;
+
+        select.addEventListener("change", async () => {
+            const chosen = select.value;
+            const item = availableModels.find(m => m.filename === chosen);
+            if (sizeSpan && item) {
+                sizeSpan.textContent = `${item.size_gb} GB`;
+            }
+
+            const lang = getLanguage();
+            const promptMsg = lang === "en"
+                ? `Switch to model "${chosen}"? Llama-server will restart with this model.`
+                : `Chuyển sang mô hình "${chosen}"? Quá trình tải mô hình vào bộ nhớ sẽ mất một chút thời gian.`;
+
+            if (confirm(promptMsg)) {
+                if (statusBanner) {
+                    statusBanner.className = "status-banner";
+                    statusBanner.textContent = lang === "en"
+                        ? `Switching to ${chosen}… Loading into memory.`
+                        : `Đang chuyển sang ${chosen}… Vui lòng đợi nạp vào bộ nhớ.`;
+                }
+                applyHealth({ llm_ready: false, message: "Đang tải mô hình mới..." });
+
+                try {
+                    await fetch("/api/models/select", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ model: chosen }),
+                    });
+                    setTimeout(checkHealth, 3000);
+                } catch (err) {
+                    console.error("Error switching model:", err);
+                }
+            } else {
+                // Revert to previously selected
+                checkHealth();
+            }
+        });
+    }
+
+    loadModelsList();
+    initModelSwitcher();
+
+    return { applyHealth, checkHealth, updateHealthSpeedDisplay, loadModelsList };
 }

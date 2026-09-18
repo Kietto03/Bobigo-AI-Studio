@@ -52,7 +52,7 @@
         opts = opts || {};
         if (!project) return "";
         const lang = opts.language === "en" ? "en" : "vi";
-        const budget = Math.max(512, (opts.contextWindow || 8192) - (opts.reserve || 2048));
+        const budget = Math.max(512, (opts.contextWindow || 16384) - (opts.reserve || 4096));
         const kcap = Math.floor(budget * 0.4);
         const lines = [];
         lines.push(lang === "en" ? `[Project: ${project.name || "Untitled"}]` : `[Dự án: ${project.name || "Chưa đặt tên"}]`);

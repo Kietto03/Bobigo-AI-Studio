@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Awaitable
 
@@ -26,8 +27,12 @@ from backend.config import (
     MAX_AGENT_ITERATIONS,
     REPLY_RESERVE,
 )
+from backend.health import get_active_context_window, get_active_reply_reserve
 from backend.tools import execute_tool, tool_schemas
 from backend.tools.genfiles import extract_file_markers
+
+log = logging.getLogger(__name__)
+
 
 
 def _build_tool_hint(is_en: bool, mcp: Any = None) -> str:
@@ -88,23 +93,38 @@ def prepare_messages(
     agent_tools: bool = True,
     mcp: Any = None,
 ) -> list[dict[str, Any]]:
-    prepared = [dict(m) for m in messages if m.get("role") != "system"]
-    existing_sys = next((dict(m) for m in messages if m.get("role") == "system"), None)
-    if existing_sys is None:
+    system_msgs = [dict(m) for m in messages if m.get("role") == "system"]
+    non_system_msgs = [dict(m) for m in messages if m.get("role") != "system"]
+
+    if not system_msgs:
         content = DEFAULT_SYSTEM_PROMPT
         if agent_tools:
             content = (content.rstrip() + "\n\n" + _build_tool_hint(False, mcp)).strip()
-        prepared.insert(0, {"role": "system", "content": content})
-        return prepared
-    sys_body = existing_sys.get("content") or ""
+        return [{"role": "system", "content": content}] + non_system_msgs
+
+    # The primary system prompt is the first system message
+    primary_sys = system_msgs[0]
+    sys_body = primary_sys.get("content") or ""
     is_en = "You are" in sys_body or "English" in sys_body or "tools:" in sys_body
     # Append the (dynamic) tool hint whenever it isn't already there — keyed on
     # "create_file" so older prompts that only mention the legacy tools still get
     # the file-generation instruction.
     if agent_tools and "create_file" not in sys_body:
-        existing_sys["content"] = (sys_body.rstrip() + "\n\n" + _build_tool_hint(is_en, mcp)).strip()
-    prepared.insert(0, existing_sys)
-    return prepared
+        primary_sys["content"] = (sys_body.rstrip() + "\n\n" + _build_tool_hint(is_en, mcp)).strip()
+
+    # Consolidate any secondary system messages (e.g. memory notes, pinned context)
+    # Merging them into the primary system prompt ensures 100% compatibility with all
+    # chat templates (avoiding multiple system tags or template errors).
+    if len(system_msgs) > 1:
+        extra_content = "\n\n".join(
+            (m.get("content") or "").strip()
+            for m in system_msgs[1:]
+            if (m.get("content") or "").strip()
+        )
+        if extra_content:
+            primary_sys["content"] = (primary_sys["content"].rstrip() + "\n\n" + extra_content).strip()
+
+    return [primary_sys] + non_system_msgs
 
 
 async def default_llm_stream(payload: dict[str, Any], client: httpx.AsyncClient) -> AsyncIterator[dict[str, Any]]:
@@ -217,25 +237,27 @@ async def stream_agent(
             if await _cancelled():
                 yield sse_done()
                 return
-            reserve = int(body.get("max_tokens") or REPLY_RESERVE)
+            ctx_window = get_active_context_window()
+            default_reserve = get_active_reply_reserve()
+            reserve = int(body.get("max_tokens") or default_reserve)
+            reserve = max(256, min(reserve, ctx_window - 512))
 
             acc_calls: dict[int, dict[str, Any]] = {}
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
             finish_reason = None
             forwarded_any = False
+            forwarded_content = False
+            context_retried = False
 
-            # Stream the model. If llama-server rejects the request (HTTP 500) —
-            # which happens when it can't parse a tool call the local model
-            # emitted, e.g. a create_file whose large multi-line `content` isn't
-            # valid JSON — and nothing has been streamed yet, retry this turn
-            # WITHOUT tools so the user still gets a plain-text answer instead of
-            # a hard error.
+            # Stream the model. If llama-server rejects the request:
+            # - HTTP 400 (context overflow): emergency prune context and retry once.
+            # - HTTP 500 (tool parsing failed): retry without tools so user gets plain-text answer.
             while True:
                 use_tools = bool(agent_tools) and not tools_disabled
                 payload: dict[str, Any] = {
                     "model": model,
-                    "messages": trim_messages(messages, window=CONTEXT_WINDOW, reserve=reserve),
+                    "messages": trim_messages(messages, window=ctx_window, reserve=reserve),
                     "temperature": body.get("temperature", 0.7),
                     "top_p": body.get("top_p", 0.9),
                     "stream": True,
@@ -253,6 +275,7 @@ async def stream_agent(
                 reasoning_parts = []
                 finish_reason = None
                 forwarded_any = False
+                forwarded_content = False
                 try:
                     async for event in _llm(payload):
                         if await _cancelled():
@@ -280,7 +303,27 @@ async def stream_agent(
                             if not looks_like_tool_markup(assembled) and not acc_calls:
                                 yield sse_pack(content_chunk(content=text))
                                 forwarded_any = True
+                                forwarded_content = True
                     break
+                except httpx.HTTPStatusError as exc:
+                    is_ctx_overflow = (
+                        exc.response.status_code == 400
+                        and any(k in exc.response.text.lower() for k in ["context", "exceed", "n_ctx", "tokens"])
+                    )
+                    if is_ctx_overflow and not forwarded_any and not context_retried:
+                        context_retried = True
+                        log.warning(
+                            "Context overflow HTTP 400 from llama-server; emergency pruning context from %d to %d: %s",
+                            ctx_window,
+                            max(1024, ctx_window // 2),
+                            exc.response.text[:200],
+                        )
+                        ctx_window = max(1024, ctx_window // 2)
+                        continue
+                    if use_tools and not forwarded_any:
+                        tools_disabled = True
+                        continue
+                    raise
                 except httpx.HTTPError:
                     if use_tools and not forwarded_any:
                         tools_disabled = True
@@ -322,16 +365,36 @@ async def stream_agent(
                     return
                 continue
 
-            if not forwarded_any and (visible or full_content):
+            if not forwarded_content and (visible or full_content):
                 yield sse_pack(content_chunk(content=visible or full_content))
-            elif not forwarded_any and finish_reason:
-                pass
+                forwarded_content = True
+                forwarded_any = True
+
+            if finish_reason in ("length", "max_tokens"):
+                limit_notice = (
+                    "\n\n⚠️ *[Đã chạm giới hạn ngữ cảnh (context limit) trong khi suy luận. "
+                    "Vui lòng nhấn nút 'Nén hội thoại' hoặc mở cuộc trò chuyện mới để tiếp tục.]*"
+                )
+                if not forwarded_content:
+                    yield sse_pack(content_chunk(content=limit_notice.strip()))
+                else:
+                    yield sse_pack(content_chunk(content=limit_notice))
+            elif not forwarded_any:
+                yield sse_pack(content_chunk(
+                    content="[Không nhận được phản hồi từ mô hình. Vui lòng thử lại hoặc bấm 'Nén hội thoại'.]"
+                ))
             yield sse_done()
             return
 
         yield sse_pack(content_chunk(
             content="Đã đạt giới hạn số vòng gọi công cụ. Hãy thử yêu cầu đơn giản hơn.",
         ))
+        yield sse_done()
+    except httpx.HTTPStatusError as exc:
+        msg = str(exc)
+        if exc.response.status_code == 400:
+            msg = "Yêu cầu vượt quá độ dài ngữ cảnh tối đa (context window). Hãy nhấn 'Nén hội thoại' hoặc mở cuộc trò chuyện mới để tiếp tục."
+        yield sse_pack(content_chunk(content=f"Lỗi mô hình ({exc.response.status_code}): {msg}"))
         yield sse_done()
     except httpx.HTTPError as exc:
         yield sse_pack(content_chunk(content=f"Lỗi kết nối mô hình: {exc}"))

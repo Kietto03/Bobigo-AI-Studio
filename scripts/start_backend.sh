@@ -30,7 +30,7 @@ fi
 
 # 3. Launch llama-server with Metal GPU acceleration (-ngl 99)
 # CONTEXT_WINDOW is shared with backend/config.py — one source of truth.
-CONTEXT_WINDOW="${CONTEXT_WINDOW:-8192}"
+CONTEXT_WINDOW="${CONTEXT_WINDOW:-16384}"
 echo "🚀 Starting llama-server on port $PORT with Metal GPU Acceleration..."
 exec llama-server \
   -m "$MODEL_PATH" \

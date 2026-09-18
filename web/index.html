@@ -16,7 +16,7 @@
     <!-- Highlight.js for Syntax Highlighting (self-hosted 11.9.0) -->
     <link rel="stylesheet" id="highlight-style" href="vendor/hljs/tokyo-night-dark.min.css">
     <script src="vendor/highlight.min.js" defer></script>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=0.2.1">
 </head>
 <body class="dark">
     <div class="sidebar-overlay hidden" id="sidebar-overlay"></div>
@@ -177,18 +177,63 @@
                         <i class="fa-solid fa-stop stop-icon" style="display:none;"></i>
                     </button>
                 </div>
-                <div class="context-meter ctx-ok" id="context-meter" title="Context window">
-                    <i class="fa-solid fa-gauge-high ctx-icon"></i>
-                    <div class="ctx-bar"><div class="ctx-fill" id="ctx-fill"></div></div>
-                    <span class="ctx-text" id="ctx-text">0%</span>
-                    <button type="button" class="ctx-compress-btn" id="ctx-compress-btn" data-i18n-title="compressNow" title="Nén hội thoại">
-                        <i class="fa-solid fa-compress"></i>
-                    </button>
+                <div class="chat-input-footer-row">
+                    <div class="context-pill-container" id="context-pill-container">
+                        <div class="context-meter ctx-ok" id="context-meter" title="Ngữ cảnh mô hình" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false">
+                            <span class="ctx-indicator-pulse"></span>
+                            <i class="fa-solid fa-microchip ctx-icon"></i>
+                            <div class="ctx-bar"><div class="ctx-fill" id="ctx-fill"></div></div>
+                            <span class="ctx-text" id="ctx-text">0%</span>
+                            <button type="button" class="ctx-compress-btn" id="ctx-compress-btn" data-i18n-title="compressNow" title="Nén ngữ cảnh">
+                                <i class="fa-solid fa-compress"></i>
+                            </button>
+                        </div>
+
+                        <!-- Context Breakdown Popover -->
+                        <div class="context-popover glass hidden" id="ctx-popover" role="dialog" aria-label="Chi tiết ngữ cảnh">
+                            <div class="ctx-popover-header">
+                                <div class="ctx-popover-title">
+                                    <i class="fa-solid fa-gauge-high"></i>
+                                    <span data-i18n="ctxPopoverTitle">Sử dụng ngữ cảnh</span>
+                                </div>
+                                <span class="ctx-popover-badge" id="ctx-popover-total">0 / 6,144 (0%)</span>
+                            </div>
+                            <div class="ctx-breakdown-list">
+                                <div class="ctx-breakdown-row">
+                                    <span class="ctx-dot dot-sys"></span>
+                                    <span class="ctx-label" data-i18n="ctxSysPrompt">Chỉ dẫn &amp; Nhân vật:</span>
+                                    <span class="ctx-val" id="ctx-popover-sys">0 tokens</span>
+                                </div>
+                                <div class="ctx-breakdown-row">
+                                    <span class="ctx-dot dot-chat"></span>
+                                    <span class="ctx-label" data-i18n="ctxChatHistory">Lịch sử trò chuyện:</span>
+                                    <span class="ctx-val" id="ctx-popover-chat">0 tokens</span>
+                                </div>
+                                <div class="ctx-breakdown-row">
+                                    <span class="ctx-dot dot-tools"></span>
+                                    <span class="ctx-label" data-i18n="ctxToolsAttach">Tệp &amp; Công cụ:</span>
+                                    <span class="ctx-val" id="ctx-popover-tools">0 tokens</span>
+                                </div>
+                                <div class="ctx-breakdown-row ctx-reserve-row">
+                                    <span class="ctx-dot dot-free"></span>
+                                    <span class="ctx-label" data-i18n="ctxFreeReserve">Dự phòng phản hồi:</span>
+                                    <span class="ctx-val" id="ctx-popover-reserve">—</span>
+                                </div>
+                            </div>
+                            <div class="ctx-popover-actions">
+                                <button type="button" class="btn-ctx-compress" id="ctx-popover-compress-btn">
+                                    <i class="fa-solid fa-compress"></i>
+                                    <span data-i18n="compressNow">Nén ngữ cảnh ngay</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <p class="input-meta" id="input-meta">
+                        <span>Enter gửi · Shift+Enter xuống dòng · Esc dừng</span>
+                        <span>Bobigo có thể sai — hãy kiểm tra kết quả quan trọng.</span>
+                    </p>
                 </div>
-                <p class="input-meta" id="input-meta">
-                    <span>Enter gửi · Shift+Enter xuống dòng · Esc dừng</span>
-                    <span>Bobigo có thể sai — hãy kiểm tra kết quả quan trọng.</span>
-                </p>
             </div>
         </main>
 
@@ -263,6 +308,16 @@
                                 <div class="health-line"><span data-i18n="latencyLabel">Độ trễ kết nối</span><span class="health-val" id="health-latency">—</span></div>
                                 <div class="health-line"><span data-i18n="jinjaLabel">Tool calling (jinja)</span><span class="health-val" id="health-jinja">—</span></div>
                                 <div class="health-line"><span data-i18n="ctxLabel">Context window</span><span class="health-val" id="health-ctx">—</span></div>
+                            </div>
+                            <div class="config-group">
+                                <div class="config-label-row">
+                                    <label for="model-select" data-i18n="selectModel">Mô hình cục bộ (.gguf)</label>
+                                    <span class="config-val" id="model-select-size">43.6 GB</span>
+                                </div>
+                                <select id="model-select" class="config-text-input">
+                                    <option value="Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf">Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf (43.6 GB - Mặc định)</option>
+                                </select>
+                                <span class="config-hint" data-i18n="selectModelHint">Mô hình Qwen 3.6 MoE được tăng tốc bởi CUDA GPU và CPU MoE.</span>
                             </div>
                             <div class="config-group">
                                 <label for="system-prompt-input" data-i18n="systemPrompt">System prompt</label>
@@ -389,6 +444,6 @@
     <script src="i18n.js" defer></script>
     <script src="companions.js" defer></script>
     <script src="projects.js" defer></script>
-    <script type="module" src="js/main.js"></script>
+    <script type="module" src="js/main.js?v=0.2.1"></script>
 </body>
 </html>
